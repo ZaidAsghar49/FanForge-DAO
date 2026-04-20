@@ -1,0 +1,206 @@
+# 38-Parameter Filtering Engine — Implementation Reference
+
+> **Files changed**
+> - [scripts/analysis/ai_parser.py](file:///d:/University/Semester%208th/FYP/AI/scripts/analysis/ai_parser.py) — extended NLP parser
+> - [scripts/analysis/validate_model.py](file:///d:/University/Semester%208th/FYP/AI/scripts/analysis/validate_model.py) — calculation & validation engine
+> - [scripts/analysis/test_parser_quick.py](file:///d:/University/Semester%208th/FYP/AI/scripts/analysis/test_parser_quick.py) — fast unit-test harness (no DB needed)
+
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart TD
+    A["Natural Language Claim"] --> B["ai_parser.parse_claim()"]
+    B --> |LLM available| C["Gemini gemini-2.5-flash"]
+    B --> |No API key| D["Rule-based _mock_parse()"]
+    C --> E["Structured JSON (38 filters)"]
+    D --> E
+    E --> F["validate_model.validate_claim()"]
+    F --> G["IdentityEngine.resolve_for_ingestion()"]
+    G --> H["apply_filters() — 38-dim filter"]
+    H --> I["_batting_metrics() / _bowling_metrics()"]
+    I --> J["Truth-O-Meter Verdict"]
+```
+
+---
+
+## The 38 Parameters
+
+### Match Context (1–12)
+
+| # | Key | Type | Example value |
+|---|-----|------|---------------|
+| 1 | `venue_name` | str | `"Melbourne Cricket Ground"` |
+| 2 | [city](file:///d:/University/Semester%208th/FYP/AI/scripts/analysis/validate_model.py#65-67) | str | `"Melbourne"` |
+| 3 | [country](file:///d:/University/Semester%208th/FYP/AI/scripts/analysis/validate_model.py#65-67) | str | `"Australia"` |
+| 4 | `format` | str | `"Test"`, `"ODI"`, `"T20I"`, `"T20"` |
+| 5 | `season` | str | `"2022"`, `"2019/20"` |
+| 6 | `day_night` | str | `"Day"`, `"Night"`, `"Day/Night"` |
+| 7 | `toss_winner` | str | team name |
+| 8 | `toss_decision` | str | `"bat"` or `"field"` |
+| 9 | `innings` | int | `1`, `2`, `3`, `4` |
+| 10 | `series` | str | `"Ashes"`, `"Asia Cup"` |
+| 11 | `home_away` | str | `"Home"`, `"Away"` |
+| 12 | `neutral_venue` | bool | `true` / `false` |
+
+### Batting Analytics (13–25)
+
+| # | Key / Metric | Notes |
+|---|-------------|-------|
+| 13 | `subject` (batter) | Resolved via IdentityEngine |
+| 14 | `Total Runs` | `runs_batter.sum()` |
+| 15 | `Balls Faced` | row count of deliveries |
+| 16 | `Batting Average` | `runs / dismissals` |
+| 17 | `Strike Rate` | [(runs / balls) × 100](file:///d:/University/Semester%208th/FYP/AI/scripts/pipeline/cricsheet_ingestion_engine.py#255-298) |
+| 18 | `dismissal_type` | filter by `wicket_type` column |
+| 19 | `Dot Ball %` | [(balls where runs_batter==0) / balls × 100](file:///d:/University/Semester%208th/FYP/AI/scripts/pipeline/cricsheet_ingestion_engine.py#255-298) |
+| 20 | `Boundary %` | [(balls where runs_batter in [4,6]) / balls × 100](file:///d:/University/Semester%208th/FYP/AI/scripts/pipeline/cricsheet_ingestion_engine.py#255-298) |
+| 21 | `batting_position` | filter by `batting_position` column |
+| 22 | `non_striker` | filter by `non_striker` column (resolved) |
+| 23 | `Partnership Runs` | aggregated `runs_batter` per partnership segment |
+| 24 | `High Score` | max innings total across `match_id + innings` |
+| 25 | `Milestones` | count innings ≥ 50 or ≥ 100 |
+
+### Bowling & Matchup Analytics (26–38)
+
+| # | Key / Metric | Notes |
+|---|-------------|-------|
+| 26 | [bowler](file:///d:/University/Semester%208th/FYP/AI/scripts/analysis/validate_model.py#69-95) / `batter_vs_bowler` | specific bowler filter (identity-resolved) |
+| 27 | `bowler_type` | `"Spin"` / `"Pace"` from bowlers.csv + IdentityEngine |
+| 28 | `bowler_hand` | `"Left"` / `"Right"` from IdentityEngine bowlingstyle field |
+| 29 | `Economy Rate` | `runs_total / overs_bowled` |
+| 30 | `Bowling Strike Rate` | `balls_bowled / wickets` |
+| 31 | `Wickets` | `is_bowler_wicket.sum()` |
+| 32 | `Dots Forced` | rows where `runs_total == 0` |
+| 33 | `Extras Conceded` | sum of wides + noballs + byes + legbyes |
+| 34 | `over_number` | 0-indexed over filter |
+| 35 | [match_phase](file:///d:/University/Semester%208th/FYP/AI/scripts/analysis/validate_model.py#97-104) | `"Powerplay"` (overs 0–5), `"Middle"` (6–14), `"Death"` (15+) |
+| 36 | `batter_vs_bowler_type` | e.g. `"Leg-spin"`, `"Left-arm Pace"` |
+| 37 | `batter_vs_bowler` | specific bowler head-to-head |
+| 38 | `Runs Conceded in Over` | `runs_total.sum()` after over-level filter |
+
+---
+
+## NLP Parser Examples
+
+```python
+from scripts.analysis.ai_parser import parse_claim
+
+# Example 1: multi-filter query
+parse_claim("Babar in the 1st innings at MCG against Left-arm Pace")
+# → {
+#   "filters": {
+#     "innings": 1,
+#     "venue_name": "Melbourne Cricket Ground",
+#     "bowler_hand": "Left",
+#     "bowler_type": "Pace"
+#   }
+# }
+
+# Example 2: bowling economy
+parse_claim("Bumrah economy in Death overs in Tests since 2020")
+# → {
+#   "metric": "Economy Rate",
+#   "filters": {
+#     "match_phase": "Death",
+#     "format": "Test",
+#     "season": "2020"
+#   }
+# }
+```
+
+---
+
+## Calculation Logic
+
+### Batting
+```
+Batting Average  = total_runs / dismissals
+Strike Rate      = (total_runs / balls_faced) × 100
+Dot Ball %       = (balls with 0 runs) / balls × 100
+Boundary %       = (balls scoring 4 or 6) / balls × 100
+High Score       = max(innings_runs per match_id+innings group)
+Milestones       = count(innings_runs ≥ 50) or count(innings_runs ≥ 100)
+```
+
+### Bowling
+```
+Economy Rate        = runs_conceded / (balls_bowled / 6)
+Bowling Average     = runs_conceded / wickets
+Bowling Strike Rate = balls_bowled / wickets
+Dots Forced         = count(deliveries where runs_total == 0)
+Extras Conceded     = sum(wides + noballs + byes + legbyes)
+```
+
+---
+
+## Dataset Column Requirements
+
+> [!IMPORTANT]
+> The filter engine checks whether each column exists before applying that filter,
+> so partial schemas degrade gracefully. For full 38-parameter support, the
+> [matches.csv](file:///d:/University/Semester%208th/FYP/AI/matches.csv) should include these columns:
+
+| Column | Source | Used By |
+|--------|--------|---------|
+| `venue_name` | ingestion engine | Filter #1 |
+| [city](file:///d:/University/Semester%208th/FYP/AI/scripts/analysis/validate_model.py#65-67) | ingestion engine | Filter #2, #3 |
+| `match_type` | ingestion engine | Filter #4 |
+| [date](file:///d:/University/Semester%208th/FYP/AI/scripts/analysis/validate_model.py#459-580) | ingestion engine | Filter #5 |
+| `day_night` | raw JSON `info.match_type_variant` | Filter #6 |
+| `toss_winner`, `toss_decision` | raw JSON `info.toss` | Filter #7, #8 |
+| `innings` | delivery loop | Filter #9 |
+| `competition` | raw JSON `info.competition` | Filter #10 |
+| `home_team` | raw JSON teams[0] | Filter #11 |
+| `neutral_venue` | raw JSON `info.neutral_venue` | Filter #12 |
+| `wicket_type` | delivery wickets | Filter #18 |
+| `batting_position` | inferred from batter order | Filter #21 |
+| `non_striker` | raw delivery | Filter #22 |
+| `over` | raw delivery | Filter #34, #35 |
+| `runs_batter`, `is_wicket`, `is_bowler_wicket`, `runs_total` | existing | Metrics |
+
+> [!NOTE]
+> Currently [matches.csv](file:///d:/University/Semester%208th/FYP/AI/matches.csv) only has 12 columns. Filters for columns that don't
+> exist are skipped silently — the engine still computes any metric that **is**
+> available (e.g. batting average with country/format/innings/opponent_type filters).
+
+---
+
+## Running the System
+
+```powershell
+# Full claim validation (uses LLM if GEMINI_API_KEY is set):
+python scripts/analysis/validate_model.py "Virat Kohli averages 55 in Tests in England"
+
+# Override with a specific claim:
+python scripts/analysis/validate_model.py "Babar Azam has 45 average in 1st innings"
+
+# Parser unit tests (no DB or CSV needed):
+python scripts/analysis/test_parser_quick.py
+```
+
+---
+
+## Filter Application Data-Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Claim String
+    participant P as ai_parser
+    participant IE as IdentityEngine
+    participant DF as matches.csv (DataFrame)
+    participant V as validate_model
+
+    C->>P: parse_claim()
+    P-->>V: {subject, metric, claimed_value, filters[38]}
+    V->>IE: resolve_for_ingestion(subject)
+    IE-->>V: canonical_name
+    V->>DF: read_csv (matches.csv)
+    DF-->>V: raw deliveries
+    V->>V: df[df['batter'] == canonical]  (subject pre-filter)
+    V->>V: apply_filters(df, filters, engine, is_batting)
+    Note over V: Applies up to 38 filters sequentially<br/>Skips filters for missing columns
+    V->>V: _batting_metrics() or _bowling_metrics()
+    V-->>C: Verdict + accuracy %
+```

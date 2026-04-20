@@ -1,0 +1,44 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Databases and large data files
+*.db
+*.duckdb
+*.sqlite
+*.csv
+*.parquet
+cricket.db
+matches.csv
+matches.parquet
+bowlers.csv
+
+# Local caches and temporary folders
+cache/
+temp/
+output/
+dataset/
+data/
+
+# Logs and text outputs
+*.log
+pipeline.log
+run_claims_output.txt
+test_debug_out*.txt
+debug_babar_out*.txt
+run_claims_summary.txt
+
+# Testing/Metrics reports
+*.json
+
+# OS generated files
+.DS_Store
+Thumbs.db
