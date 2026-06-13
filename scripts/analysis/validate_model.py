@@ -1629,6 +1629,63 @@ def validate_parsed_claim(parsed: dict, claim_string: str, skip_predictions: boo
     if as_of_date:
         filters["as_of_date"] = as_of_date
 
+    # ── Spatial Filter Guardrail (prevent hallucinated venue country filter) ──
+    country_filter = filters.get("country")
+    if country_filter:
+        country_lower = str(country_filter).lower().strip()
+        claim_lower = claim_string.lower()
+        
+        # 1. Nullify if it matches format/metric keywords
+        format_keywords = {"test", "tests", "odi", "odis", "t20", "t20s", "t20i", "t20is"}
+        if country_lower in format_keywords:
+            filters["country"] = None
+            if "filters" in parsed and parsed["filters"]:
+                parsed["filters"]["country"] = None
+            print(f"    [GUARDRAIL] Nullified format-matching country filter: '{country_filter}'")
+        else:
+            # 2. Check if the country (or its common adjective/adverb form) is mentioned in the claim
+            COUNTRY_KEYWORDS = {
+                "india": ["india", "indian"],
+                "australia": ["australia", "australian"],
+                "england": ["england", "english"],
+                "south africa": ["south africa", "south african", "s. africa"],
+                "new zealand": ["new zealand", "kiwi", "nz"],
+                "pakistan": ["pakistan", "pakistani"],
+                "sri lanka": ["sri lanka", "sri lankan"],
+                "west indies": ["west indies", "windies", "caribbean"],
+                "bangladesh": ["bangladesh", "bangladeshi"],
+                "afghanistan": ["afghanistan", "afghan"],
+                "zimbabwe": ["zimbabwe", "zimbabwean"],
+                "ireland": ["ireland", "irish"],
+                "scotland": ["scotland", "scottish"],
+                "netherlands": ["netherlands", "dutch"],
+                "nepal": ["nepal", "nepalese"],
+                "oman": ["oman", "omani"],
+                "uae": ["uae", "emirati", "united arab emirates"],
+                "usa": ["usa", "united states", "america", "american"],
+                "namibia": ["namibia", "namibian"],
+                "canada": ["canada", "canadian"],
+                "papua new guinea": ["papua new guinea", "png"],
+            }
+            
+            is_mentioned = False
+            if country_lower in COUNTRY_KEYWORDS:
+                for kw in COUNTRY_KEYWORDS[country_lower]:
+                    if kw in claim_lower:
+                        is_mentioned = True
+                        break
+            else:
+                if country_lower in claim_lower:
+                    is_mentioned = True
+                elif len(country_lower) > 4 and country_lower[:-1] in claim_lower:
+                    is_mentioned = True
+            
+            if not is_mentioned:
+                filters["country"] = None
+                if "filters" in parsed and parsed["filters"]:
+                    parsed["filters"]["country"] = None
+                print(f"    [GUARDRAIL] Nullified hallucinated country filter: '{country_filter}'")
+
     # ── Metric normalisation: override LLM if user explicitly stated bowling/batting ──
     claim_lower = claim_string.lower()
     if "bowling average" in claim_lower:
