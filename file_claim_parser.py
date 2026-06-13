@@ -175,23 +175,34 @@ def extract_text(file_bytes: bytes, filename: str) -> Generator[str, None, None]
 
 def _split_into_sentences(text: str) -> list[str]:
     """
-    Naïve sentence splitter. Handles abbreviations (e.g., 'Sr.', 'avg.') reasonably.
+    Sentence and line-based splitter. Splits by newlines first to isolate independent
+    queries, then runs a naïve sentence splitter on each line.
     """
-    # Protect decimal numbers from being split (e.g. "54.72" -> no split)
-    text = re.sub(r"(\d)\.(\d)", r"\1DECIMAL\2", text)
-    # Protect common abbreviations
-    text = re.sub(r"\b(vs|Sr|Mr|Mrs|Dr|avg|approx|Est|min|max)\.", r"\1ABBR", text, flags=re.IGNORECASE)
+    # First, split on one or more newlines
+    lines = re.split(r"[\r\n]+", text)
+    cleaned_sentences = []
+    
+    for line in lines:
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+            
+        # Protect decimal numbers from being split (e.g. "54.72" -> no split)
+        line_processed = re.sub(r"(\d)\.(\d)", r"\1DECIMAL\2", line_stripped)
+        # Protect common abbreviations
+        line_processed = re.sub(r"\b(vs|Sr|Mr|Mrs|Dr|avg|approx|Est|min|max)\.", r"\1ABBR", line_processed, flags=re.IGNORECASE)
 
-    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text)
+        # Naïve sentence splitter on the line
+        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", line_processed)
 
-    # Restore
-    cleaned = []
-    for s in sentences:
-        s = s.replace("DECIMAL", ".").replace("ABBR", ".")
-        s = s.strip()
-        if s:
-            cleaned.append(s)
-    return cleaned
+        # Restore decimals/abbreviations and clean up
+        for s in sentences:
+            s = s.replace("DECIMAL", ".").replace("ABBR", ".")
+            s = s.strip()
+            if s:
+                cleaned_sentences.append(s)
+                
+    return cleaned_sentences
 
 
 def isolate_claims(paragraphs: Generator[str, None, None]) -> list[str]:
