@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY web_clean /app/web_clean
 COPY clean_analysis /app/clean_analysis
 COPY scripts /app/scripts
+COPY file_claim_parser.py /app/file_claim_parser.py
 
 # Copy data resources
 COPY bowlers.csv /app/bowlers.csv
