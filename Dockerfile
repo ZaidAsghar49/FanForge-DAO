@@ -27,6 +27,7 @@ COPY file_claim_parser.py /app/file_claim_parser.py
 # Copy data resources
 COPY bowlers.csv /app/bowlers.csv
 COPY Dataset/Processed/cricket_clean_38.db.gz /app/Dataset/Processed/cricket_clean_38.db.gz
+COPY Dataset/Players/players_data_with_all_info.csv /app/Dataset/Players/players_data_with_all_info.csv
 
 # Expose Hugging Face Spaces default port
 EXPOSE 7860
