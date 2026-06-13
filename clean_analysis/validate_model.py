@@ -1784,6 +1784,48 @@ def validate_parsed_claim(parsed: dict, claim_string: str, skip_predictions: boo
     canonical = subj_res["canonical_name"]
     print(f"    >> Resolved: '{subject}' -> '{canonical}'")
 
+    # ── Opposition Filter Guardrail (prevent hallucinated opposition team filter) ──
+    opposition_filter = filters.get("opposition")
+    if opposition_filter:
+        opp_lower = str(opposition_filter).lower().strip()
+        claim_lower = claim_string.lower()
+        player_country = subj_res.get("country")
+        
+        # 1. Nullify if opposition matches player's own country
+        is_own_country = False
+        if player_country:
+            pc_lower = player_country.lower().strip()
+            if opp_lower == pc_lower:
+                is_own_country = True
+            elif pc_lower == "india" and opp_lower in {"india", "indian"}:
+                is_own_country = True
+            elif pc_lower == "england" and opp_lower in {"england", "english"}:
+                is_own_country = True
+            elif pc_lower == "australia" and opp_lower in {"australia", "australian"}:
+                is_own_country = True
+            elif len(pc_lower) > 4 and (opp_lower in pc_lower or pc_lower in opp_lower):
+                is_own_country = True
+                
+        # 2. Nullify if it matches format, metric, or bowler type keywords
+        invalid_opp_keywords = {
+            "test", "tests", "odi", "odis", "t20", "t20s", "t20i", "t20is",
+            "spin", "pace", "fast", "medium", "seam", "swing", "seamer", "spinner",
+            "average", "economy", "strike rate", "wickets", "runs"
+        }
+        
+        # 3. Check if the opposition name is actually mentioned in the claim string
+        is_mentioned = False
+        if opp_lower in claim_lower:
+            is_mentioned = True
+        elif len(opp_lower) > 4 and opp_lower[:-1] in claim_lower:
+            is_mentioned = True
+            
+        if is_own_country or opp_lower in invalid_opp_keywords or not is_mentioned:
+            filters["opposition"] = None
+            if "filters" in parsed and parsed["filters"]:
+                parsed["filters"]["opposition"] = None
+            print(f"    [GUARDRAIL] Nullified invalid/hallucinated opposition filter: '{opposition_filter}'")
+
     if not metric:
         role = subj_res.get("primary_role", "Unknown")
         metric = "Bowling Economy" if "Bowler" in role else "Batting Average"
