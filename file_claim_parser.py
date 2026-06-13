@@ -59,7 +59,9 @@ _STAT_METRIC_PATTERNS = [
     r"\bballs?\s+faced\b",
     r"\bscores?\b",
     r"\bpicks?\s+(up\s+)?\d+\s+wickets?\b",
-    r"\bconcedes?\b",
+    r"\bconced(e|es|ed)\b",
+    r"\bdismissals?\b",
+    r"\brate\b",
     r"\bhas\s+scored\b",
     r"\btook\s+\d+\s+wickets?\b",
     r"\b\d+\s+wickets?\s+in\b",
@@ -176,10 +178,18 @@ def extract_text(file_bytes: bytes, filename: str) -> Generator[str, None, None]
 def _split_into_sentences(text: str) -> list[str]:
     """
     Sentence and line-based splitter. Splits by newlines first to isolate independent
-    queries, then runs a naïve sentence splitter on each line.
+    queries (protecting middle-of-sentence wraps), then runs a naïve sentence splitter on each line.
     """
-    # First, split on one or more newlines
-    lines = re.split(r"[\r\n]+", text)
+    query_verbs = r"(?:Verify|Check|Compare|Calculate|Validate|Confirm|Determine|Analyze|Report)"
+    
+    # 1. Replace newlines followed by a query verb with a placeholder
+    text_processed = re.sub(rf"\s*[\r\n]+\s*(?={query_verbs}\b)", "__QUERY_SEP__", text)
+    # 2. Replace other newlines (middle-of-sentence line wraps) with a space
+    text_processed = re.sub(r"\s*[\r\n]+\s*", " ", text_processed)
+    # 3. Restore placeholder to clean newlines
+    text_processed = text_processed.replace("__QUERY_SEP__", "\n")
+    
+    lines = text_processed.split("\n")
     cleaned_sentences = []
     
     for line in lines:
@@ -210,7 +220,7 @@ def isolate_claims(paragraphs: Generator[str, None, None]) -> list[str]:
     Stage 2: Converts a stream of paragraphs into a list of candidate claim sentences.
 
     A sentence is considered a claim candidate if it:
-      1. Contains a numeric value (can't verify without a number)
+      1. Contains a numeric value OR starts with a query-starting action verb
       2. Matches at least one stat-metric pattern
       3. Is at least 10 characters long
 
@@ -230,8 +240,12 @@ def isolate_claims(paragraphs: Generator[str, None, None]) -> list[str]:
             if len(sent_clean) < 10:
                 continue
 
-            # Must have a numeric anchor
-            if not _NUMERIC_RE.search(sent_clean):
+            # Must have a numeric anchor OR start with a query verb
+            has_number = bool(_NUMERIC_RE.search(sent_clean))
+            starts_with_query_verb = any(sent_clean.lower().startswith(v) for v in [
+                "verify", "check", "compare", "calculate", "validate", "confirm", "determine", "analyze", "report"
+            ])
+            if not (has_number or starts_with_query_verb):
                 continue
 
             # Must match a stat-metric pattern
