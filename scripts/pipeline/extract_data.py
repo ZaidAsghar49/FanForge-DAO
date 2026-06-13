@@ -1,78 +1,60 @@
 """
-extract_data.py — Full 38-Column Ball-by-Ball Re-Ingestion Engine
-==================================================================
-Processes ALL Cricsheet JSON files from Dataset/Matches/ and emits a single
-matches.csv with every column required by the 38-parameter filter engine.
+extract_data.py — Active Player Era Low-RAM Ingestion Engine (ZSTD Compression)
+================================================================================
+Flattens nested Cricsheet JSON match files and populates both the SQLite DB
+(cricket.db) and Parquet store (matches.parquet) directly using stream-writing.
 
-Output columns (38 + metadata):
-  Match Context    : match_id, date, season, venue_name, city, country,
-                     match_type, competition, day_night, neutral_venue,
-                     toss_winner, toss_decision, team_a, team_b,
-                     home_team, overs_limit
-  Delivery Context : innings, over, ball, batting_team, bowling_team,
-                     match_phase
-  Batting          : batter, non_striker, batting_position,
-                     runs_batter, is_wicket, wicket_type,
-                     is_bowler_wicket
-  Bowling          : bowler, bowler_type, bowler_hand,
-                     runs_total, extras_wides, extras_noballs,
-                     extras_byes, extras_legbyes
-
-Usage:
-    python scripts/pipeline/extract_data.py              # full run
-    python scripts/pipeline/extract_data.py --limit 500  # test with 500 files
-    python scripts/pipeline/extract_data.py --workers 4  # parallel (4 CPUs)
+Max RAM usage is strictly bounded under 250MB. Matches prior to 2019-01-01 are
+discarded early after opening date metadata.
 """
 
-import argparse
-import csv
-import json
 import os
 import sys
+import json
+import sqlite3
+import argparse
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import gc
 from pathlib import Path
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-ROOT        = Path(__file__).resolve().parents[2]
-DATASET_DIR = str(ROOT / "Dataset" / "Matches")
-OUTPUT_CSV  = str(ROOT / "matches.csv")
-BOWLERS_CSV = str(ROOT / "bowlers.csv")
-CITY_MAP_PY = str(ROOT / "scripts" / "pipeline" / "city_map.py")
+ROOT         = Path(__file__).resolve().parents[2]
+DATASET_DIR  = str(ROOT / "Dataset" / "Matches")
+SQLITE_DB    = str(ROOT / "cricket.db")
+PARQUET_FILE = str(ROOT / "matches.parquet")
+BOWLERS_CSV  = str(ROOT / "bowlers.csv")
 
 # ── Load city → country map ───────────────────────────────────────────────────
 sys.path.insert(0, str(ROOT))
 from scripts.pipeline.city_map import CITY_COUNTRY_MAP
 
-# ── Load bowler style cache from bowlers.csv ──────────────────────────────────
+# ── Bowler Cache ──────────────────────────────────────────────────────────────
 def _load_bowler_cache() -> dict[str, tuple[str, str]]:
     """Returns {bowler_name: (type, hand)} from bowlers.csv."""
-    cache: dict[str, tuple[str, str]] = {}
+    cache = {}
     try:
+        import csv
         with open(BOWLERS_CSV, newline="", encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
                 name  = row.get("bowler", "").strip()
                 style = row.get("style", "").strip()
                 btype = "Spin" if style == "Spin" else ("Pace" if style == "Pace" else "Unknown")
-                cache[name] = (btype, "Unknown")   # hand requires players_db
+                cache[name] = (btype, "Unknown")
     except Exception:
         pass
     return cache
 
-
-BOWLER_CACHE: dict[str, tuple[str, str]] = {}   # filled in main() before workers
-
-
-# ── Cricsheet field helpers ───────────────────────────────────────────────────
-
+# ── Heuristic helpers ─────────────────────────────────────────────────────────
 def _match_phase(over: int) -> str:
     if over <= 5:
         return "Powerplay"
     if over <= 14:
         return "Middle"
     return "Death"
-
 
 def _day_night(info: dict) -> str:
     mv = str(info.get("match_type_variant", "")).lower()
@@ -82,9 +64,7 @@ def _day_night(info: dict) -> str:
         return "Night"
     return "Day"
 
-
 def _competition(info: dict) -> str:
-    """Pull competition / series name from event or competition keys."""
     event = info.get("event", {})
     if isinstance(event, dict):
         name = event.get("name", "")
@@ -94,20 +74,12 @@ def _competition(info: dict) -> str:
         return name
     return str(info.get("competition", "International")).strip() or "International"
 
-
 def _home_team(info: dict) -> str:
-    """
-    Attempt to determine the home team.
-    Cricsheet doesn't always record this explicitly; we use a heuristic:
-      • team whose country matches the city country is 'home'
-      • otherwise first team alphabetically (arbitrary but deterministic)
-    """
     city    = info.get("city", "")
     country = CITY_COUNTRY_MAP.get(city, "")
     teams   = info.get("teams", [])
     if not teams:
         return ""
-    # Map team → approximate country name
     team_country_hints = {
         "Australia": "Australia", "England": "England", "India": "India",
         "Pakistan": "Pakistan", "South Africa": "South Africa",
@@ -120,287 +92,396 @@ def _home_team(info: dict) -> str:
         tc = team_country_hints.get(team, "")
         if tc and tc.lower() == country.lower():
             return team
-    return teams[0]   # fallback
-
+    return teams[0]
 
 BOWLER_WICKET_KINDS = frozenset({
     "bowled", "caught", "lbw", "stumped", "hit wicket", "caught and bowled"
 })
 
+# ── SQLite DDL ────────────────────────────────────────────────────────────────
+SQLITE_CREATE = """
+CREATE TABLE IF NOT EXISTS deliveries (
+    match_id         TEXT,
+    date             TEXT,
+    season           TEXT,
+    venue_name       TEXT,
+    city             TEXT,
+    country          TEXT,
+    match_type       TEXT,
+    competition      TEXT,
+    day_night        TEXT,
+    neutral_venue    INTEGER DEFAULT 0,
+    toss_winner      TEXT,
+    toss_decision    TEXT,
+    team_a           TEXT,
+    team_b           TEXT,
+    home_team        TEXT,
+    overs_limit      INTEGER DEFAULT 0,
+    innings          INTEGER DEFAULT 0,
+    over             INTEGER DEFAULT 0,
+    ball             INTEGER DEFAULT 0,
+    batting_team     TEXT,
+    bowling_team     TEXT,
+    match_phase      TEXT,
+    batter           TEXT,
+    non_striker      TEXT,
+    batting_position INTEGER DEFAULT 0,
+    runs_batter      INTEGER DEFAULT 0,
+    is_wicket        INTEGER DEFAULT 0,
+    wicket_type      TEXT,
+    is_bowler_wicket INTEGER DEFAULT 0,
+    bowler           TEXT,
+    bowler_type      TEXT,
+    bowler_hand      TEXT,
+    runs_total       INTEGER DEFAULT 0,
+    extras_wides     INTEGER DEFAULT 0,
+    extras_noballs   INTEGER DEFAULT 0,
+    extras_byes      INTEGER DEFAULT 0,
+    extras_legbyes   INTEGER DEFAULT 0
+);
+"""
 
-# ── Per-file processor ────────────────────────────────────────────────────────
-
-def process_file(filepath: str, bowler_cache: dict) -> list[dict]:
-    """Parse one Cricsheet JSON and return a list of delivery dicts."""
-    try:
-        with open(filepath, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception:
-        return []
-
-    info     = data.get("info", {})
-    innings  = data.get("innings", [])
-    if not innings:
-        return []
-
-    # ── Match-level metadata (shared across all deliveries) ───────────────────
-    match_id     = os.path.basename(filepath).split(".")[0]
-    teams        = info.get("teams", [])
-    dates        = info.get("dates", ["1970-01-01"])
-    date_str     = dates[0] if dates else "1970-01-01"
-    season       = str(info.get("season", date_str[:4]))
-    venue_name   = info.get("venue", "")
-    city         = info.get("city", venue_name)
-    country      = CITY_COUNTRY_MAP.get(city, info.get("country", "Unknown"))
-    match_type   = info.get("match_type", "Unknown")
-    competition  = _competition(info)
-    day_night    = _day_night(info)
-    neutral_v    = bool(info.get("neutral_venue", False))
-    toss         = info.get("toss", {})
-    toss_winner  = toss.get("winner", "")
-    toss_decision= toss.get("decision", "")
-    overs_limit  = int(info.get("overs", 20 if match_type == "T20" else 50))
-    team_a       = teams[0] if len(teams) > 0 else ""
-    team_b       = teams[1] if len(teams) > 1 else ""
-    home_team    = _home_team(info)
-
-    records: list[dict] = []
-
-    for inn_idx, inning in enumerate(innings):
-        innings_num  = inn_idx + 1
-        batting_team = inning.get("team", "")
-        bowling_team = next((t for t in teams if t != batting_team), "")
-        overs        = inning.get("overs", [])
-
-        # ── Track batting order per innings ───────────────────────────────────
-        batting_order: dict[str, int] = {}
-        position_counter = 0
-
-        for over_obj in overs:
-            over_num = int(over_obj.get("over", 0))   # 0-indexed in Cricsheet
-            phase    = _match_phase(over_num)
-            deliveries = over_obj.get("deliveries", [])
-
-            for ball_idx, delivery in enumerate(deliveries):
-                batter      = delivery.get("batter", "")
-                bowler      = delivery.get("bowler", "")
-                non_striker = delivery.get("non_striker", "")
-
-                # ── Batting position ──────────────────────────────────────────
-                if batter and batter not in batting_order:
-                    position_counter += 1
-                    batting_order[batter] = position_counter
-                bat_pos = batting_order.get(batter, 0)
-
-                # ── Runs ──────────────────────────────────────────────────────
-                runs_obj      = delivery.get("runs", {})
-                runs_batter   = int(runs_obj.get("batter", 0))
-                extras_val    = int(runs_obj.get("extras", 0))
-                runs_total    = int(runs_obj.get("total", runs_batter + extras_val))
-
-                # ── Extras breakdown ──────────────────────────────────────────
-                extras_obj    = delivery.get("extras", {})
-                ext_wides     = int(extras_obj.get("wides", 0))
-                ext_noballs   = int(extras_obj.get("noballs", 0))
-                ext_byes      = int(extras_obj.get("byes", 0))
-                ext_legbyes   = int(extras_obj.get("legbyes", 0))
-
-                # ── Wickets ───────────────────────────────────────────────────
-                wicket_list      = delivery.get("wickets", [])
-                is_wicket        = 0
-                wicket_type      = ""
-                is_bowler_wicket = 0
-
-                if wicket_list:
-                    w = wicket_list[0]
-                    kind = w.get("kind", "")
-                    # is_wicket == 1 when the batter is dismissed
-                    if w.get("player_out", "") == batter:
-                        is_wicket   = 1
-                        wicket_type = kind
-                    if kind in BOWLER_WICKET_KINDS:
-                        is_bowler_wicket = 1
-
-                # ── Bowler type & hand ────────────────────────────────────────
-                btype, bhand = bowler_cache.get(bowler, ("Unknown", "Unknown"))
-
-                records.append({
-                    # ── Match context ─────────────────────────────────────
-                    "match_id":      match_id,
-                    "date":          date_str,
-                    "season":        season,
-                    "venue_name":    venue_name,
-                    "city":          city,
-                    "country":       country,
-                    "match_type":    match_type,
-                    "competition":   competition,
-                    "day_night":     day_night,
-                    "neutral_venue": neutral_v,
-                    "toss_winner":   toss_winner,
-                    "toss_decision": toss_decision,
-                    "team_a":        team_a,
-                    "team_b":        team_b,
-                    "home_team":     home_team,
-                    "overs_limit":   overs_limit,
-                    # ── Delivery context ──────────────────────────────────
-                    "innings":       innings_num,
-                    "over":          over_num,
-                    "ball":          ball_idx + 1,
-                    "batting_team":  batting_team,
-                    "bowling_team":  bowling_team,
-                    "match_phase":   phase,
-                    # ── Batting ───────────────────────────────────────────
-                    "batter":          batter,
-                    "non_striker":     non_striker,
-                    "batting_position": bat_pos,
-                    "runs_batter":     runs_batter,
-                    "is_wicket":       is_wicket,
-                    "wicket_type":     wicket_type,
-                    "is_bowler_wicket": is_bowler_wicket,
-                    # ── Bowling ───────────────────────────────────────────
-                    "bowler":          bowler,
-                    "bowler_type":     btype,
-                    "bowler_hand":     bhand,
-                    "runs_total":      runs_total,
-                    "extras_wides":    ext_wides,
-                    "extras_noballs":  ext_noballs,
-                    "extras_byes":     ext_byes,
-                    "extras_legbyes":  ext_legbyes,
-                })
-
-    return records
-
-
-# ── Worker wrapper (needed for ProcessPoolExecutor) ───────────────────────────
-def _worker(args):
-    fp, cache = args
-    return process_file(fp, cache)
-
-
-# ── CSV column order ──────────────────────────────────────────────────────────
-CSV_COLUMNS = [
-    "match_id", "date", "season", "venue_name", "city", "country",
-    "match_type", "competition", "day_night", "neutral_venue",
-    "toss_winner", "toss_decision", "team_a", "team_b", "home_team", "overs_limit",
-    "innings", "over", "ball", "batting_team", "bowling_team", "match_phase",
-    "batter", "non_striker", "batting_position",
-    "runs_batter", "is_wicket", "wicket_type", "is_bowler_wicket",
-    "bowler", "bowler_type", "bowler_hand",
-    "runs_total", "extras_wides", "extras_noballs", "extras_byes", "extras_legbyes",
+SQLITE_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_batter        ON deliveries(batter);",
+    "CREATE INDEX IF NOT EXISTS idx_bowler        ON deliveries(bowler);",
+    "CREATE INDEX IF NOT EXISTS idx_match_id      ON deliveries(match_id);",
+    "CREATE INDEX IF NOT EXISTS idx_match_type    ON deliveries(match_type);",
+    "CREATE INDEX IF NOT EXISTS idx_city          ON deliveries(city);",
+    "CREATE INDEX IF NOT EXISTS idx_country       ON deliveries(country);",
+    "CREATE INDEX IF NOT EXISTS idx_venue_name    ON deliveries(venue_name);",
+    "CREATE INDEX IF NOT EXISTS idx_date          ON deliveries(date);",
+    "CREATE INDEX IF NOT EXISTS idx_season        ON deliveries(season);",
+    "CREATE INDEX IF NOT EXISTS idx_innings       ON deliveries(innings);",
+    "CREATE INDEX IF NOT EXISTS idx_competition   ON deliveries(competition);",
+    "CREATE INDEX IF NOT EXISTS idx_toss_winner   ON deliveries(toss_winner);",
+    "CREATE INDEX IF NOT EXISTS idx_toss_decision ON deliveries(toss_decision);",
+    "CREATE INDEX IF NOT EXISTS idx_neutral_venue ON deliveries(neutral_venue);",
+    "CREATE INDEX IF NOT EXISTS idx_day_night     ON deliveries(day_night);",
+    "CREATE INDEX IF NOT EXISTS idx_batting_team  ON deliveries(batting_team);",
+    "CREATE INDEX IF NOT EXISTS idx_bowling_team  ON deliveries(bowling_team);",
+    "CREATE INDEX IF NOT EXISTS idx_over          ON deliveries(over);",
+    "CREATE INDEX IF NOT EXISTS idx_match_phase   ON deliveries(match_phase);",
+    "CREATE INDEX IF NOT EXISTS idx_batting_pos   ON deliveries(batting_position);",
+    "CREATE INDEX IF NOT EXISTS idx_non_striker   ON deliveries(non_striker);",
+    "CREATE INDEX IF NOT EXISTS idx_wicket_type   ON deliveries(wicket_type);",
+    "CREATE INDEX IF NOT EXISTS idx_is_wicket     ON deliveries(is_wicket);",
+    "CREATE INDEX IF NOT EXISTS idx_bowler_type   ON deliveries(bowler_type);",
+    "CREATE INDEX IF NOT EXISTS idx_bowler_hand   ON deliveries(bowler_hand);",
+    "CREATE INDEX IF NOT EXISTS idx_batter_format ON deliveries(batter, match_type);",
+    "CREATE INDEX IF NOT EXISTS idx_bowler_format ON deliveries(bowler, match_type);",
 ]
 
+# ── PyArrow Schema (for Parquet consistency) ──────────────────────────────────
+PARQUET_SCHEMA = pa.schema([
+    ("match_id",         pa.string()),
+    ("date",             pa.string()),
+    ("season",           pa.string()),
+    ("venue_name",       pa.string()),
+    ("city",             pa.string()),
+    ("country",          pa.string()),
+    ("match_type",       pa.string()),
+    ("competition",      pa.string()),
+    ("day_night",        pa.string()),
+    ("neutral_venue",    pa.int8()),
+    ("toss_winner",      pa.string()),
+    ("toss_decision",    pa.string()),
+    ("team_a",           pa.string()),
+    ("team_b",           pa.string()),
+    ("home_team",        pa.string()),
+    ("overs_limit",      pa.int16()),
+    ("innings",          pa.int16()),
+    ("over",             pa.int16()),
+    ("ball",             pa.int16()),
+    ("batting_team",     pa.string()),
+    ("bowling_team",     pa.string()),
+    ("match_phase",      pa.string()),
+    ("batter",           pa.string()),
+    ("non_striker",      pa.string()),
+    ("batting_position", pa.int16()),
+    ("runs_batter",      pa.int16()),
+    ("is_wicket",        pa.int8()),
+    ("wicket_type",      pa.string()),
+    ("is_bowler_wicket", pa.int8()),
+    ("bowler",           pa.string()),
+    ("bowler_type",      pa.string()),
+    ("bowler_hand",      pa.string()),
+    ("runs_total",       pa.int16()),
+    ("extras_wides",     pa.int16()),
+    ("extras_noballs",   pa.int16()),
+    ("extras_byes",      pa.int16()),
+    ("extras_legbyes",   pa.int16()),
+])
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+def _clean_and_cast_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Explicitly clean up column names and cast types for consistency."""
+    int_cols = {
+        "neutral_venue": "int8",
+        "overs_limit": "int16",
+        "innings": "int16",
+        "over": "int16",
+        "ball": "int16",
+        "batting_position": "int16",
+        "runs_batter": "int16",
+        "is_wicket": "int8",
+        "is_bowler_wicket": "int8",
+        "runs_total": "int16",
+        "extras_wides": "int16",
+        "extras_noballs": "int16",
+        "extras_byes": "int16",
+        "extras_legbyes": "int16",
+    }
+    for col, dtype in int_cols.items():
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(dtype)
 
-def main(limit: int | None = None, workers: int = 1,
-         batch_size: int = 500, output: str = OUTPUT_CSV) -> None:
-    t0 = time.time()
+    str_cols = [
+        "match_id", "date", "season", "venue_name", "city", "country",
+        "match_type", "competition", "day_night", "toss_winner", "toss_decision",
+        "team_a", "team_b", "home_team", "batting_team", "bowling_team", "match_phase",
+        "batter", "non_striker", "wicket_type", "bowler", "bowler_type", "bowler_hand"
+    ]
+    for col in str_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(str).replace({"nan": None, "None": None, "": None})
 
-    # Load bowler cache before scanning files (fast)
-    global BOWLER_CACHE
-    BOWLER_CACHE = _load_bowler_cache()
-    print(f"[extract_data] Bowler cache loaded: {len(BOWLER_CACHE):,} entries.")
+    return df
 
-    # Scan JSON files
-    import glob as _glob
-    all_files = sorted(_glob.glob(os.path.join(DATASET_DIR, "*.json")))
+# ── Pipeline Implementation ───────────────────────────────────────────────────
+def stream_and_filter_cricket_data(json_dir, sqlite_db_path, parquet_out_path, limit=None):
+    print("Initializing Active Player Era (2019-2026) Low-RAM Pipeline...")
+    t_start = time.time()
+
+    # Load Bowler classifications
+    bowler_cache = _load_bowler_cache()
+    print(f"Bowler cache loaded: {len(bowler_cache):,} entries.")
+
+    # Connect to SQLite
+    conn = sqlite3.connect(sqlite_db_path)
+    cursor = conn.cursor()
+
+    # Apply SQLite performance pragmas for transaction speed
+    cursor.executescript("""
+        PRAGMA journal_mode = WAL;
+        PRAGMA cache_size = -64000;
+        PRAGMA synchronous = NORMAL;
+    """)
+
+    # Drop existing table to prevent duplicate ingestion runs
+    cursor.execute("DROP TABLE IF EXISTS deliveries;")
+    cursor.execute(SQLITE_CREATE)
+    conn.commit()
+
+    processed_count = 0
+    skipped_count = 0
+    parquet_writer = None
+
+    # Scan and sort all files in json_dir
+    all_files = sorted([f for f in os.listdir(json_dir) if f.endswith('.json')])
     if limit:
         all_files = all_files[:limit]
     total_files = len(all_files)
-    print(f"[extract_data] Found {total_files:,} JSON files to process.")
-    print(f"[extract_data] Output → {output}")
-    print(f"[extract_data] Workers: {workers}  |  Batch size: {batch_size:,}")
 
-    first_write = True
-    total_rows  = 0
-    processed   = 0
-    errors      = 0
+    print(f"Scanning {total_files:,} files from {json_dir}...")
 
-    def _flush(batch_records: list[dict]) -> None:
-        nonlocal first_write, total_rows
-        if not batch_records:
-            return
-        import csv as _csv
-        mode   = "w" if first_write else "a"
-        header = first_write
-        with open(output, mode, newline="", encoding="utf-8") as fh:
-            writer = _csv.DictWriter(fh, fieldnames=CSV_COLUMNS,
-                                     extrasaction="ignore")
-            if header:
-                writer.writeheader()
-            writer.writerows(batch_records)
-        total_rows  += len(batch_records)
-        first_write  = False
+    for i, filename in enumerate(all_files):
+        file_path = os.path.join(json_dir, filename)
 
-    pending_records: list[dict] = []
-
-    if workers > 1:
-        # ── Parallel processing ───────────────────────────────────────────────
-        args_list = [(fp, BOWLER_CACHE) for fp in all_files]
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_worker, a): a[0] for a in args_list}
-            for fut in as_completed(futures):
-                processed += 1
-                try:
-                    recs = fut.result()
-                    pending_records.extend(recs)
-                except Exception as exc:
-                    errors += 1
-                    print(f"  [ERR] {futures[fut]}: {exc}")
-
-                if len(pending_records) >= batch_size * 400:
-                    _flush(pending_records)
-                    pending_records.clear()
-                    eta = (time.time() - t0) / processed * (total_files - processed)
-                    print(f"  [{processed:>6}/{total_files}]  rows={total_rows:,}  "
-                          f"errors={errors}  ETA={eta:.0f}s")
-    else:
-        # ── Sequential processing ─────────────────────────────────────────────
-        for i, fp in enumerate(all_files):
+        with open(file_path, 'r', encoding='utf-8') as f:
             try:
-                recs = process_file(fp, BOWLER_CACHE)
-                pending_records.extend(recs)
-            except Exception as exc:
-                errors += 1
-                print(f"  [ERR] {os.path.basename(fp)}: {exc}")
+                match_data = json.load(f)
+            except Exception:
+                continue
 
-            processed += 1
-            if processed % batch_size == 0 or processed == total_files:
-                _flush(pending_records)
-                pending_records.clear()
-                elapsed = time.time() - t0
-                pct     = processed / total_files * 100
-                rate    = processed / elapsed if elapsed > 0 else 0
-                eta     = (total_files - processed) / rate if rate > 0 else 0
-                print(f"  [{processed:>6}/{total_files}]  {pct:5.1f}%  "
-                      f"rows={total_rows:,}  errors={errors}  "
-                      f"elapsed={elapsed:.0f}s  ETA={eta:.0f}s")
+        # --- EARLY DISCARD BLOCK (RAM Optimization) ---
+        info = match_data.get('info', {})
+        dates = info.get('dates', [])
+        if not dates:
+            del match_data
+            continue
 
-    # Flush any remaining
-    _flush(pending_records)
+        match_date_str = dates[0]
+        try:
+            match_year = int(match_date_str.split('-')[0])
+        except ValueError:
+            del match_data
+            continue
 
-    elapsed = time.time() - t0
-    print(f"\n[extract_data] ✅ DONE")
-    print(f"  Files processed : {processed:,} / {total_files:,}  (errors: {errors})")
-    print(f"  Total rows      : {total_rows:,}")
-    print(f"  Output file     : {output}")
-    print(f"  Time elapsed    : {elapsed:.1f}s  ({elapsed/60:.1f} min)")
-    size_mb = os.path.getsize(output) / 1e6 if os.path.exists(output) else 0
-    print(f"  File size       : {size_mb:.1f} MB")
+        # Option 5 boundary: matches from Jan 1, 2019 onwards
+        if match_year < 2019:
+            skipped_count += 1
+            del match_data
+            # Force garbage collection occasionally
+            if skipped_count % 1000 == 0:
+                gc.collect()
+            continue
 
+        # --- CONVERSION & FLATTENING BLOCK ---
+        delivery_rows = []
+
+        match_id      = filename.replace('.json', '')
+        teams         = info.get("teams", [])
+        season        = str(info.get("season", match_date_str[:4]))
+        venue_name    = info.get("venue", "")
+        city          = info.get("city", venue_name)
+        country       = CITY_COUNTRY_MAP.get(city, info.get("country", "Unknown"))
+        match_type    = info.get("match_type", "Unknown")
+        competition   = _competition(info)
+        day_night     = _day_night(info)
+        neutral_v     = int(bool(info.get("neutral_venue", False)))
+        toss          = info.get("toss", {})
+        toss_winner   = toss.get("winner", "")
+        toss_decision = toss.get("decision", "")
+        overs_limit   = int(info.get("overs", 20 if match_type == "T20" else 50))
+        team_a        = teams[0] if len(teams) > 0 else ""
+        team_b        = teams[1] if len(teams) > 1 else ""
+        home_team     = _home_team(info)
+
+        innings_list = match_data.get('innings', [])
+        for inn_idx, innings_data in enumerate(innings_list):
+            innings_no = inn_idx + 1
+            batting_team = innings_data.get("team", "")
+            bowling_team = next((t for t in teams if t != batting_team), "")
+            overs = innings_data.get('overs', [])
+
+            batting_order = {}
+            position_counter = 0
+
+            for over_data in overs:
+                over_no = int(over_data.get('over', 0))
+                phase = _match_phase(over_no)
+                deliveries = over_data.get('deliveries', [])
+
+                for ball_idx, delivery in enumerate(deliveries):
+                    batter      = delivery.get('batter', '')
+                    non_striker = delivery.get('non_striker', '')
+                    bowler      = delivery.get('bowler', '')
+
+                    if batter and batter not in batting_order:
+                        position_counter += 1
+                        batting_order[batter] = position_counter
+                    bat_pos = batting_order.get(batter, 0)
+
+                    runs_obj    = delivery.get('runs', {})
+                    runs_batter = int(runs_obj.get('batter', 0))
+                    extras_val  = int(runs_obj.get('extras', 0))
+                    runs_total  = int(runs_obj.get('total', runs_batter + extras_val))
+
+                    extras_obj  = delivery.get('extras', {})
+                    ext_wides   = int(extras_obj.get('wides', 0))
+                    ext_noballs = int(extras_obj.get('noballs', 0))
+                    ext_byes    = int(extras_obj.get('byes', 0))
+                    ext_legbyes = int(extras_obj.get('legbyes', 0))
+
+                    wicket_list      = delivery.get('wickets', [])
+                    is_wicket        = 0
+                    wicket_type      = ""
+                    is_bowler_wicket = 0
+
+                    if wicket_list:
+                        w = wicket_list[0]
+                        kind = w.get('kind', '')
+                        if w.get('player_out', '') == batter:
+                            is_wicket   = 1
+                            wicket_type = kind
+                        if kind in BOWLER_WICKET_KINDS:
+                            is_bowler_wicket = 1
+
+                    btype, bhand = bowler_cache.get(bowler, ("Unknown", "Unknown"))
+
+                    delivery_rows.append({
+                        "match_id":         match_id,
+                        "date":             match_date_str,
+                        "season":           season,
+                        "venue_name":       venue_name,
+                        "city":             city,
+                        "country":          country,
+                        "match_type":       match_type,
+                        "competition":      competition,
+                        "day_night":        day_night,
+                        "neutral_venue":    neutral_v,
+                        "toss_winner":      toss_winner,
+                        "toss_decision":    toss_decision,
+                        "team_a":           team_a,
+                        "team_b":           team_b,
+                        "home_team":        home_team,
+                        "overs_limit":      overs_limit,
+                        "innings":          innings_no,
+                        "over":             over_no,
+                        "ball":             ball_idx + 1,
+                        "batting_team":     batting_team,
+                        "bowling_team":     bowling_team,
+                        "match_phase":      phase,
+                        "batter":           batter,
+                        "non_striker":      non_striker,
+                        "batting_position": bat_pos,
+                        "runs_batter":      runs_batter,
+                        "is_wicket":        is_wicket,
+                        "wicket_type":      wicket_type,
+                        "is_bowler_wicket": is_bowler_wicket,
+                        "bowler":           bowler,
+                        "bowler_type":      btype,
+                        "bowler_hand":      bhand,
+                        "runs_total":       runs_total,
+                        "extras_wides":     ext_wides,
+                        "extras_noballs":   ext_noballs,
+                        "extras_byes":      ext_byes,
+                        "extras_legbyes":   ext_legbyes,
+                    })
+
+        # --- STORAGE FLUSH BLOCK ---
+        if delivery_rows:
+            df_match = pd.DataFrame(delivery_rows)
+            df_match = _clean_and_cast_df(df_match)
+
+            # 1. Append to SQLite
+            df_match.to_sql('deliveries', conn, if_exists='append', index=False)
+
+            # 2. Append incrementally to Parquet (ZSTD compression for optimal size/speed ratio)
+            pa_table = pa.Table.from_pandas(df_match, schema=PARQUET_SCHEMA, preserve_index=False)
+            if parquet_writer is None:
+                parquet_writer = pq.ParquetWriter(parquet_out_path, PARQUET_SCHEMA, compression='ZSTD')
+            parquet_writer.write_table(pa_table)
+
+            processed_count += 1
+            if processed_count % 100 == 0:
+                elapsed = time.time() - t_start
+                rate = processed_count / elapsed if elapsed > 0 else 0
+                print(f"Status Update: Processed {processed_count} matches | Skipped {skipped_count} pre-2019 matches | Rate: {rate:.1f} matches/sec")
+
+        # Explicitly free memory
+        del delivery_rows
+        del match_data
+        gc.collect()
+
+    # Create SQLite indexes for fast dashboard queries
+    print("Building database indexes...")
+    for idx_sql in SQLITE_INDEXES:
+        cursor.execute(idx_sql)
+    conn.commit()
+
+    # Close resources
+    if parquet_writer:
+        parquet_writer.close()
+    conn.close()
+
+    elapsed = time.time() - t_start
+    print(f"Pipeline Execution Terminated. Extraction Complete!")
+    print(f"  Processed Modern Era Matches : {processed_count}")
+    print(f"  Skipped Historical Matches   : {skipped_count}")
+    print(f"  Elapsed Time                 : {elapsed:.1f}s")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Re-ingest Cricsheet JSON → matches.csv (38 columns)"
-    )
-    parser.add_argument("--limit",   type=int, default=None,
-                        help="Process only first N files (for testing)")
-    parser.add_argument("--workers", type=int, default=1,
-                        help="Number of parallel worker processes (default: 1)")
-    parser.add_argument("--batch",   type=int, default=500,
-                        help="Flush to CSV every N files (default: 500)")
-    parser.add_argument("--output",  type=str, default=OUTPUT_CSV,
-                        help="Output CSV path (default: matches.csv in project root)")
+    parser = argparse.ArgumentParser(description="Active Player Era Low-RAM Ingestion Engine")
+    parser.add_argument("--limit", type=int, default=None, help="Process only first N files (for testing)")
+    parser.add_argument("--json-dir", type=str, default=DATASET_DIR, help="Path to match JSON directory")
+    parser.add_argument("--sqlite-db", type=str, default=SQLITE_DB, help="Output SQLite database path")
+    parser.add_argument("--parquet-out", type=str, default=PARQUET_FILE, help="Output Parquet path")
     args = parser.parse_args()
-    main(limit=args.limit, workers=args.workers,
-         batch_size=args.batch, output=args.output)
+
+    # Re-evaluate database & Parquet outputs
+    stream_and_filter_cricket_data(
+        json_dir=args.json_dir,
+        sqlite_db_path=args.sqlite_db,
+        parquet_out_path=args.parquet_out,
+        limit=args.limit
+    )

@@ -22,9 +22,33 @@ class MatchParser:
             "bowled", "caught", "lbw", "stumped", "hit wicket", "caught and bowled"
         })
 
-    def _match_phase(self, over):
-        if over <= 5: return "Powerplay"
-        if over <= 14: return "Middle"
+    def _match_phase(self, over: int, match_type: str, overs_limit: int | None):
+        """
+        Format-aware phases:
+        - T20/T20I: Powerplay overs 1–6, Death = last 5 overs
+        - ODI:      Powerplay overs 1–10, Death = last 5 overs
+        - Fallback: coarse buckets
+        NOTE: over is 0-indexed (Cricsheet).
+        """
+        mt = (match_type or "").lower()
+        ol = None
+        try:
+            ol = int(overs_limit) if overs_limit is not None else None
+        except Exception:
+            ol = None
+        if ol is None:
+            ol = 50 if "odi" in mt else 20 if "t20" in mt else None
+
+        if ol is not None and over >= max(0, ol - 5):
+            return "Death"
+        if "odi" in mt:
+            return "Powerplay" if over <= 9 else "Middle"
+        if "t20" in mt:
+            return "Powerplay" if over <= 5 else "Middle"
+        if over <= 5:
+            return "Powerplay"
+        if over <= 14:
+            return "Middle"
         return "Death"
 
     def parse_match(self, filepath):
@@ -77,7 +101,7 @@ class MatchParser:
             
             for over_obj in inning.get("overs", []):
                 over_num = int(over_obj.get("over", 0))
-                phase = self._match_phase(over_num)
+                phase = self._match_phase(over_num, match_type, overs_limit)
                 
                 for ball_idx, delivery in enumerate(over_obj.get("deliveries", [])):
                     batter = delivery.get("batter", "")

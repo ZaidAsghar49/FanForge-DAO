@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FanForge — Cricket Truth-O-Meter</title>
+    <meta name="description" content="FanForge Clean-Room Cricket Stats. Browse matches, player analytics, run SQL queries, and verify cricket claims with AI-powered Truth-O-Meter.">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="style.css">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="logo-area">
+                <div class="logo-icon">
+                    <i class="fa-solid fa-square-poll-vertical"></i>
+                </div>
+                <div>
+                    <h2>FanForge</h2>
+                    <p class="subtitle">Clean-Room Stats</p>
+                </div>
+            </div>
+            <nav class="nav-menu">
+                <button class="nav-btn active" data-tab="tab-matches">
+                    <i class="fa-solid fa-list-check"></i>
+                    <span>Browse Matches</span>
+                </button>
+                <button class="nav-btn" data-tab="tab-players">
+                    <i class="fa-solid fa-user-ninja"></i>
+                    <span>Player Analytics</span>
+                </button>
+                <button class="nav-btn" data-tab="tab-verify">
+                    <i class="fa-solid fa-magnifying-glass-chart"></i>
+                    <span>Truth-O-Meter</span>
+                    <span class="nav-badge">AI</span>
+                </button>
+                <button class="nav-btn" data-tab="tab-sql">
+                    <i class="fa-solid fa-terminal"></i>
+                    <span>SQL Playground</span>
+                </button>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="badge">
+                    <span class="badge-dot"></span>
+                    <span>Dataset: cricket_clean</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Top Dashboard Stats Header -->
+            <header class="stats-header">
+                <div class="stat-card">
+                    <div class="stat-icon green">
+                        <i class="fa-solid fa-baseball-bat-ball"></i>
+                    </div>
+                    <div class="stat-info">
+                        <span class="label">Matches Loaded</span>
+                        <h3 id="stat-matches">-</h3>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon blue">
+                        <i class="fa-solid fa-chart-line"></i>
+                    </div>
+                    <div class="stat-info">
+                        <span class="label">Total Deliveries</span>
+                        <h3 id="stat-deliveries">-</h3>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon amber">
+                        <i class="fa-solid fa-users"></i>
+                    </div>
+                    <div class="stat-info">
+                        <span class="label">Unique Players</span>
+                        <h3 id="stat-players">-</h3>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon purple">
+                        <i class="fa-solid fa-calendar-days"></i>
+                    </div>
+                    <div class="stat-info">
+                        <span class="label">Temporal Range</span>
+                        <h3 id="stat-range">-</h3>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Tabs Section -->
+            <div class="tab-content">
+                <!-- TAB: Matches Browser -->
+                <section id="tab-matches" class="tab-pane active">
+                    <div class="filter-bar">
+                        <div class="filter-group">
+                            <label><i class="fa-solid fa-filter"></i> Format</label>
+                            <select id="filter-format">
+                                <option value="">All Formats</option>
+                                <option value="ODI">ODI</option>
+                                <option value="Test">Test</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label><i class="fa-solid fa-calendar"></i> Year</label>
+                            <select id="filter-year">
+                                <option value="">All Years</option>
+                                <option value="2019">2019</option>
+                                <option value="2020">2020</option>
+                                <option value="2021">2021</option>
+                                <option value="2022">2022</option>
+                                <option value="2023">2023</option>
+                                <option value="2024">2024</option>
+                                <option value="2025">2025</option>
+                                <option value="2026">2026</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label><i class="fa-solid fa-flag"></i> Team</label>
+                            <select id="filter-team">
+                                <option value="">All Teams</option>
+                                <!-- Populated dynamically -->
+                            </select>
+                        </div>
+                        <div class="filter-group flex-grow">
+                            <label><i class="fa-solid fa-magnifying-glass"></i> Search</label>
+                            <input type="text" id="search-matches" placeholder="Search venue, city, or awards...">
+                        </div>
+                    </div>
+
+                    <!-- Matches List Grid -->
+                    <div class="matches-grid" id="matches-container">
+                        <!-- Spinner loading -->
+                        <div class="spinner-container">
+                            <div class="spinner"></div>
+                            <p>Loading clean matches...</p>
+                        </div>
+                    </div>
+
+                    <!-- Pagination -->
+                    <div class="pagination">
+                        <button id="btn-prev" class="page-btn"><i class="fa-solid fa-chevron-left"></i> Previous</button>
+                        <span id="page-info">Page 1 of 1</span>
+                        <button id="btn-next" class="page-btn">Next <i class="fa-solid fa-chevron-right"></i></button>
+                    </div>
+                </section>
+
+                <!-- TAB: Player Analytics -->
+                <section id="tab-players" class="tab-pane">
+                    <div class="player-search-area">
+                        <div class="search-box-container">
+                            <i class="fa-solid fa-magnifying-glass search-icon"></i>
+                            <input type="text" id="player-search-input" placeholder="Type player name (e.g. Virat Kohli, Babar Azam)..." autocomplete="off">
+                            <div class="suggestions" id="player-suggestions"></div>
+                        </div>
+                        <button id="btn-analyze-player" class="action-btn">Analyze Statistics</button>
+                    </div>
+
+                    <!-- Player Stats Report -->
+                    <div class="player-profile-container hidden" id="player-profile">
+                        <div class="player-profile-header">
+                            <div class="player-avatar">
+                                <i class="fa-solid fa-user-tie"></i>
+                            </div>
+                            <div>
+                                <h2 id="profile-name">Player Name</h2>
+                                <p class="text-muted"><span class="badge-dot green"></span> Verified International stats (2019-2026)</p>
+                            </div>
+                        </div>
+
+                        <div class="profile-grid">
+                            <!-- Batting Statistics -->
+                            <div class="profile-card">
+                                <div class="profile-card-title">
+                                    <i class="fa-solid fa-baseball-bat-ball"></i> Batting Statistics
+                                </div>
+                                <div class="stats-table-wrapper">
+                                    <table class="stats-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Format</th>
+                                                <th>Inns</th>
+                                                <th>Runs</th>
+                                                <th>Average</th>
+                                                <th>S/R</th>
+                                                <th>H/S</th>
+                                                <th>100s</th>
+                                                <th>50s</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="profile-batting-body">
+                                            <!-- Dynamically filled -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- Bowling Statistics -->
+                            <div class="profile-card">
+                                <div class="profile-card-title">
+                                    <i class="fa-solid fa-circle-dot"></i> Bowling Statistics
+                                </div>
+                                <div class="stats-table-wrapper">
+                                    <table class="stats-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Format</th>
+                                                <th>Match</th>
+                                                <th>Overs</th>
+                                                <th>Wkts</th>
+                                                <th>Average</th>
+                                                <th>Econ</th>
+                                                <th>Best</th>
+                                                <th>5W</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="profile-bowling-body">
+                                            <!-- Dynamically filled -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- Historical Runs Chart -->
+                            <div class="profile-card col-span-2">
+                                <div class="profile-card-title">
+                                    <i class="fa-solid fa-chart-area"></i> Career Runs Progression (Timeline View)
+                                </div>
+                                <div class="chart-container">
+                                    <canvas id="runsHistoryChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Empty state -->
+                    <div class="empty-state" id="player-empty-state">
+                        <i class="fa-solid fa-user-ninja"></i>
+                        <h3>Analyze Player Metrics</h3>
+                        <p>Search for a player above to dynamically parse and display aggregate Test/ODI statistics.</p>
+                    </div>
+                </section>
+
+                <!-- TAB: Truth-O-Meter -->
+                <section id="tab-verify" class="tab-pane">
+                    <div class="verify-hero">
+                        <div class="verify-hero-icon">
+                            <i class="fa-solid fa-scale-balanced"></i>
+                        </div>
+                        <div>
+                            <h2>Truth-O-Meter <span class="ai-badge">AI Powered</span></h2>
+                            <p class="text-muted">Verify cricket statistics against 3.2M+ ball-by-ball records from international matches (2019–2026).</p>
+                        </div>
+                    </div>
+
+                    <!-- Verify Mode Toggle -->
+                    <div class="verify-mode-toggle">
+                        <button class="mode-btn active" id="mode-text-btn" data-mode="text">
+                            <i class="fa-solid fa-keyboard"></i> Type a Claim
+                        </button>
+                        <button class="mode-btn" id="mode-file-btn" data-mode="file">
+                            <i class="fa-solid fa-file-arrow-up"></i> Upload Document
+                        </button>
+                    </div>
+
+                    <!-- TEXT CLAIM MODE -->
+                    <div class="verify-panel" id="verify-text-panel">
+                        <div class="claim-input-area">
+                            <label class="input-label">
+                                <i class="fa-solid fa-quote-left"></i>
+                                Enter a cricket statistical claim to verify
+                            </label>
+                            <textarea
+                                id="claim-textarea"
+                                rows="3"
+                                maxlength="2000"
+                                placeholder='e.g. "Virat Kohli averages 53.5 in ODIs" or "Babar Azam has scored 3000 runs in Test cricket since 2020"'
+                            ></textarea>
+                            <div class="claim-input-footer">
+                                <span class="char-count" id="claim-char-count">0 / 2000</span>
+                                <div class="example-claims">
+                                    <span>Examples:</span>
+                                    <button class="example-btn" data-claim="Virat Kohli averages 53.50 in ODIs">Kohli ODI avg</button>
+                                    <button class="example-btn" data-claim="Jasprit Bumrah has an economy of 4.5 in Tests">Bumrah economy</button>
+                                    <button class="example-btn" data-claim="Babar Azam has a strike rate of 88 in ODIs">Babar SR</button>
+                                    <button class="example-btn" data-claim="Joe Root averages 50 in Test cricket">Root Test avg</button>
+                                </div>
+                            </div>
+                        </div>
+                        <button id="btn-verify-claim" class="action-btn verify-btn">
+                            <i class="fa-solid fa-magnifying-glass-chart"></i>
+                            Verify Claim
+                        </button>
+
+                        <!-- Single Claim Result -->
+                        <div id="single-verdict-container" class="hidden"></div>
+                    </div>
+
+                    <!-- FILE UPLOAD MODE -->
+                    <div class="verify-panel hidden" id="verify-file-panel">
+                        <div class="file-upload-area" id="file-drop-zone">
+                            <i class="fa-solid fa-cloud-arrow-up upload-icon"></i>
+                            <h3>Drop your document here</h3>
+                            <p class="text-muted">or click to browse files</p>
+                            <p class="file-types">Supported: <strong>.txt</strong> and <strong>.pdf</strong></p>
+                            <input type="file" id="file-input" accept=".txt,.pdf" hidden>
+                            <button class="browse-btn" id="btn-browse-file">
+                                <i class="fa-solid fa-folder-open"></i> Browse Files
+                            </button>
+                        </div>
+
+                        <!-- File selected state -->
+                        <div class="file-selected hidden" id="file-selected-info">
+                            <div class="file-info-card">
+                                <div class="file-icon-wrap">
+                                    <i class="fa-solid fa-file-lines"></i>
+                                </div>
+                                <div class="file-details">
+                                    <span class="file-name" id="selected-file-name">document.txt</span>
+                                    <span class="file-size text-muted" id="selected-file-size">—</span>
+                                </div>
+                                <button class="remove-file-btn" id="btn-remove-file">
+                                    <i class="fa-solid fa-xmark"></i>
+                                </button>
+                            </div>
+                            <div class="upload-options">
+                                <label>Max claims to verify:
+                                    <select id="max-claims-select">
+                                        <option value="5">5</option>
+                                        <option value="10">10</option>
+                                        <option value="15" selected>15</option>
+                                        <option value="20">20</option>
+                                        <option value="30">30</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <button id="btn-analyze-doc" class="action-btn verify-btn">
+                                <i class="fa-solid fa-magnifying-glass-chart"></i>
+                                Analyze Document
+                            </button>
+                        </div>
+
+                        <!-- Document Results -->
+                        <div id="doc-verdicts-container" class="hidden"></div>
+                    </div>
+                </section>
+
+                <!-- TAB: SQL Playground -->
+                <section id="tab-sql" class="tab-pane">
+                    <div class="sql-container">
+                        <div class="sql-editor-panel">
+                            <h3><i class="fa-solid fa-code"></i> SQL Query Console (SELECT only)</h3>
+                            <p class="description">Query `matches`, `deliveries`, and `players` using full SQLite index syntax.</p>
+                            
+                            <div class="preset-queries">
+                                <span class="preset-label">Presets:</span>
+                                <button class="preset-btn" data-sql="SELECT batter, SUM(runs_batter) as total_runs, COUNT(CASE WHEN is_wide=0 THEN 1 END) as balls FROM deliveries GROUP BY batter ORDER BY total_runs DESC LIMIT 10">Top Run Scorers</button>
+                                <button class="preset-btn" data-sql="SELECT bowler, COUNT(*) as wickets FROM deliveries WHERE wicket_kind IS NOT NULL AND wicket_kind NOT IN ('run out', 'retired hurt') GROUP BY bowler ORDER BY wickets DESC LIMIT 10">Top Wicket Takers</button>
+                                <button class="preset-btn" data-sql="SELECT venue, COUNT(*) as matches_played FROM matches GROUP BY venue ORDER BY matches_played DESC LIMIT 5">Most Frequent Venues</button>
+                                <button class="preset-btn" data-sql="SELECT match_id, date, team1, team2, result_winner, result_margin, result_unit FROM matches WHERE result_margin > 300 AND result_unit = 'runs'">Largest Victories (Runs)</button>
+                            </div>
+
+                            <textarea id="sql-input" rows="6" placeholder="SELECT * FROM matches LIMIT 5"></textarea>
+                            <button id="btn-run-sql" class="action-btn"><i class="fa-solid fa-play"></i> Execute Query</button>
+                        </div>
+
+                        <div class="sql-results-panel">
+                            <h3><i class="fa-solid fa-table"></i> Query Results <span id="sql-row-count" class="row-count-badge"></span></h3>
+                            <div class="results-table-wrapper" id="sql-table-container">
+                                <div class="empty-state-small">
+                                    <i class="fa-solid fa-table"></i>
+                                    <p>Results will be displayed here after execution.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <!-- Match scorecard modal overlay -->
+    <div class="modal-overlay hidden" id="match-modal">
+        <div class="modal-card">
+            <button class="modal-close-btn" id="btn-close-modal"><i class="fa-solid fa-xmark"></i></button>
+            
+            <div class="modal-header">
+                <div>
+                    <span id="modal-format" class="format-badge">ODI</span>
+                    <h2 id="modal-title">Team A vs Team B</h2>
+                    <p id="modal-meta" class="text-muted"><i class="fa-solid fa-map-pin"></i> Venue Details | Date</p>
+                </div>
+            </div>
+
+            <div class="modal-sub-header">
+                <div class="sub-meta-item">
+                    <strong>Toss:</strong> <span id="modal-toss">-</span>
+                </div>
+                <div class="sub-meta-item">
+                    <strong>Player of Match:</strong> <span id="modal-pom">-</span>
+                </div>
+                <div class="sub-meta-item">
+                    <strong>Outcome:</strong> <span id="modal-outcome">-</span>
+                </div>
+            </div>
+
+            <!-- Tab indicators for innings scorecards -->
+            <div class="scorecard-tabs" id="scorecard-tabs-container">
+                <!-- Dynamically populated innings buttons -->
+            </div>
+
+            <div class="scorecard-content" id="scorecard-content-container">
+                <!-- Dynamically populated tables -->
+                <div class="spinner-container">
+                    <div class="spinner"></div>
+                    <p>Fetching scorecard statistics...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+<script src="app.js"></script>
+</html>

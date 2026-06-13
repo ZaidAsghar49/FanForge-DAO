@@ -5,8 +5,8 @@ from pathlib import Path
 
 # Config
 ROOT = Path(__file__).resolve().parents[1]
-SQLITE_DB = str(ROOT / "cricket.db")
-DUCKDB_PATH = str(ROOT / "data" / "processed" / "cricket.duckdb")
+SQLITE_DB = str(ROOT / "cricket_india.db")
+DUCKDB_PATH = str(ROOT / "data" / "processed" / "cricket_india.duckdb")
 
 def migrate():
     """Performs a robust, high-performance migration from SQLite to DuckDB."""

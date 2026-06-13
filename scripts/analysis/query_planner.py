@@ -352,7 +352,7 @@ class QueryPlanner:
     _BOWLING_KEYWORDS = {
         "wickets", "economy rate", "economy", "dots forced", "extras conceded",
         "extras", "runs conceded", "bowling average", "bowling strike rate",
-        "bowling economy", "strike rate",
+        "bowling economy",
     }
     _BATTING_KEYWORDS = {
         "high score", "milestones", "partnership runs", "balls faced",
@@ -363,6 +363,15 @@ class QueryPlanner:
     def _resolve_role(self, metric: str, subj_res: dict) -> bool:
         """True = batting, False = bowling."""
         ml = (metric or "").lower()
+        if "batting strike rate" in ml:
+            return True
+        if "bowling strike rate" in ml:
+            return False
+        if "strike rate" in ml:
+            # Check player's primary role for generic strike rate
+            role = subj_res.get("primary_role", "Unknown")
+            return "Bowler" not in role
+
         if any(k in ml for k in self._BOWLING_KEYWORDS):
             return False
         if any(k in ml for k in self._BATTING_KEYWORDS):

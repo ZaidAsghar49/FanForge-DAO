@@ -22,103 +22,125 @@ if env_file.exists():
 from scripts.analysis.validate_model import validate_claim
 
 st.set_page_config(
-    page_title="CricketTruth AI",
-    page_icon="🏏",
+    page_title="CricketTruth Deterministic Engine",
+    page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Premium Look
+# Custom CSS for a Deterministic, Professional Look
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap');
     
+    :root {
+        --bg-main: #0b0c10;
+        --bg-sidebar: #1f2833;
+        --accent: #66fcf1;
+        --text-primary: #ffffff;
+        --text-secondary: #c5c6c7;
+        --border-color: #45a29e;
+    }
+
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
     }
     
     .stApp {
-        background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
-        color: #e6edf3;
+        background-color: var(--bg-main);
+        color: var(--text-primary);
     }
     
     .main .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
+        padding-top: 3rem;
+        padding-bottom: 3rem;
+        max-width: 1200px;
     }
     
-    /* Title Styling */
+    /* Header Styling */
     h1 {
-        font-weight: 800;
-        letter-spacing: -0.05em;
-        background: linear-gradient(90deg, #58a6ff 0%, #bc8cff 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 1.5rem;
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: var(--accent);
+        margin-bottom: 0.5rem;
+        border-bottom: 2px solid var(--border-color);
+        display: inline-block;
+        padding-bottom: 5px;
+    }
+    
+    h5 {
+        color: var(--text-secondary);
+        font-weight: 400;
+        margin-top: 0;
     }
     
     /* Metric Card Styling */
     [data-testid="stMetricValue"] {
+        font-family: 'JetBrains Mono', monospace;
         font-weight: 700;
-        color: #58a6ff !important;
+        color: var(--accent) !important;
     }
     
     [data-testid="stMetricLabel"] {
         font-weight: 600;
-        color: #8b949e !important;
+        color: var(--text-secondary) !important;
         text-transform: uppercase;
-        font-size: 0.75rem;
-        letter-spacing: 0.05em;
+        font-size: 0.7rem;
+        letter-spacing: 0.1em;
     }
 
     /* Sidebar Styling */
     section[data-testid="stSidebar"] {
-        background-color: rgba(22, 27, 34, 0.8);
-        backdrop-filter: blur(10px);
-        border-right: 1px solid rgba(255, 255, 255, 0.1);
+        background-color: var(--bg-sidebar);
+        border-right: 1px solid var(--border-color);
     }
     
     /* Button Styling */
     .stButton > button {
-        background: linear-gradient(90deg, #238636 0%, #2ea043 100%);
-        color: white;
-        border: none;
-        border-radius: 8px;
+        background-color: transparent;
+        color: var(--accent);
+        border: 1px solid var(--accent);
+        border-radius: 4px;
         font-weight: 600;
+        font-family: 'JetBrains Mono', monospace;
         padding: 0.5rem 2rem;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 12px rgba(35, 134, 54, 0.3);
+        transition: all 0.2s ease;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
     }
     
     .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 16px rgba(35, 134, 54, 0.4);
-        background: linear-gradient(90deg, #2ea043 0%, #3fb950 100%);
+        background-color: var(--accent);
+        color: var(--bg-main);
+        border: 1px solid var(--accent);
     }
 
     /* Expander / Card Styling */
     .streamlit-expanderHeader {
-        background-color: rgba(48, 54, 61, 0.4);
-        border-radius: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        background-color: rgba(69, 162, 158, 0.1);
+        border-radius: 4px;
+        border: 1px solid rgba(69, 162, 158, 0.3);
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏏 CricketTruth AI Intelligence Platform")
-st.markdown("##### The world's first unified engine for Claim Verification and AI Insights.")
+st.title("⚖️ CricketTruth Deterministic Engine")
+st.markdown("##### Ground Truth Verification for Cricket Analytics.")
 
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/000000/cricket.png", width=80)
-    st.header("Intelligence Hub")
+    st.image("https://img.icons8.com/ios-filled/100/66fcf1/scales.png", width=60)
+    st.header("Verification Hub")
     st.markdown("""
-    - 🗣️ **Natural Language Analytics**
-    - ✅ **Claim Verification**
-    - 🔮 **Predictive Engine**
-    - 📊 **Visual Insights**
+    - 🔍 **Logic-Based Extraction**
+    - ⚖️ **Deterministic Verification**
+    - 📑 **Data Provenance**
+    - 📈 **Metric Accuracy**
     """)
     st.divider()
-    st.caption("v2.4.0-hardened | Engine: DuckDB 0.10.0")
+    st.header("⚙️ Performance")
+    enable_preds = st.checkbox("Enable Predictive Engine", value=False, help="Runs on-the-fly ML training for next-match estimates. Slower.")
+    st.caption("v2.4.1-optimized | Engine: DuckDB 0.10.0")
 
 
 st.info(
@@ -137,7 +159,7 @@ if st.button("Analyze & Verify"):
             # We redirect stdout so it doesn't clutter the terminal while running streamlit
             f = io.StringIO()
             with redirect_stdout(f):
-                result = validate_claim(claim_input)
+                result = validate_claim(claim_input, skip_predictions=not enable_preds)
             debug_log = f.getvalue()
                 
             if result.get("status") == "error":
@@ -145,37 +167,84 @@ if st.button("Analyze & Verify"):
             elif result.get("status") == "no_data":
                 st.warning(result.get("message", "Not enough data for the given filters."))
             else:
-                st.header("Result")
-                
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Subject", str(result.get("subject", "N/A")))
-                col2.metric("Metric", str(result.get("metric", "N/A")))
-                rv = result.get("real_val")
-                col3.metric("Value", "N/A" if rv is None else f"{rv:.4f}")
-                col4.metric("Sample size", str(result.get("sample_size", "N/A")))
+                if result.get("is_multi_claim"):
+                    st.header("Verification Output (Multi-Claim Paragraph)")
+                    st.write(f"Decomposed into **{len(result['verdicts'])}** structural claims:")
+                    for idx, sub_res in enumerate(result["verdicts"], 1):
+                        with st.expander(f"Claim #{idx}: {sub_res.get('subject', 'N/A')} - {sub_res.get('metric', 'N/A')} (Verdict: {sub_res.get('verdict', 'N/A')})", expanded=True):
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Subject", str(sub_res.get("subject", "N/A")))
+                            c2.metric("Metric", str(sub_res.get("metric", "N/A")))
+                            sub_rv = sub_res.get("real_val")
+                            c3.metric("Computed Value", "N/A" if sub_rv is None else f"{sub_rv:.4f}")
+                            c4.metric("Data Points", str(sub_res.get("sample_size", "N/A")))
 
-                verdict = result.get("verdict")
-                if verdict:
-                    st.subheader("Verdict")
-                    st.write(verdict)
+                            st.write(f"**Verdict:** {sub_res.get('verdict', 'N/A')}")
+                            if sub_res.get("insight"):
+                                st.info(sub_res.get("insight"))
+
+                            sub_filt = sub_res.get("filters") or {}
+                            if sub_filt:
+                                st.write("**Resolved Filters:**")
+                                sf_grid = st.columns(3)
+                                for s_idx, (k, v) in enumerate(sub_filt.items()):
+                                    display_k = k.replace("_", " ").title()
+                                    if k == "over_range":
+                                        v = f"Overs {v[0]+1}-{v[1]+1}"
+                                    sf_grid[s_idx % 3].markdown(f"**{display_k}**: `{v}`")
+                else:
+                    st.header("Verification Output")
                     
-                with st.expander("Filters applied"):
-                    st.json(result.get("filters") or {})
-                    
-                if "real_meta" in result and result["real_meta"]:
-                    meta = result["real_meta"]
-                    st.markdown("#### Explainability")
-                    meta_col1, meta_col2, meta_col3 = st.columns(3)
-                    meta_col1.caption(f"**Formula Used:** {meta.get('formula', 'N/A')}")
-                    if "dismissals" in meta:
-                        meta_col2.caption(
-                            f"**Balls Faced:** {meta.get('balls', 0):,}  |  **Dismissals:** {meta.get('dismissals', 0)}"
-                        )
-                    else:
-                        meta_col2.caption(
-                            f"**Overs Bowled:** {meta.get('overs', 0):.1f}  |  **Wickets:** {meta.get('wickets', 0)}"
-                        )
-                    meta_col3.caption(f"**Sample Size:** {meta.get('innings', 0)} Innings")
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Subject", str(result.get("subject", "N/A")))
+                    col2.metric("Metric", str(result.get("metric", "N/A")))
+                    rv = result.get("real_val")
+                    col3.metric("Computed Value", "N/A" if rv is None else f"{rv:.4f}")
+                    col4.metric("Data Points", str(result.get("sample_size", "N/A")))
+
+                    verdict = result.get("verdict")
+                    if verdict:
+                        st.subheader("Final Verdict")
+                        st.write(verdict)
+                        
+                    with st.expander("🔍 Filter Logic & Identity Resolution", expanded=True):
+                        f_col1, f_col2 = st.columns([2, 1])
+                        with f_col1:
+                            st.write("**Resolved Filters:**")
+                            filt = result.get("filters") or {}
+                            if not filt:
+                                st.write("_None_")
+                            else:
+                                # Display filters in a grid
+                                f_grid = st.columns(3)
+                                for idx, (k, v) in enumerate(filt.items()):
+                                    display_k = k.replace("_", " ").title()
+                                    if k == "over_range":
+                                        v = f"Overs {v[0]+1}-{v[1]+1}"
+                                    f_grid[idx % 3].markdown(f"**{display_k}**: `{v}`")
+                        
+                        with f_col2:
+                            st.write("**Entity Resolution:**")
+                            st.write(f"Canonical ID: `{result.get('subject', 'N/A')}`")
+                            if "real_meta" in result and "components" in result["real_meta"]:
+                                comp = result["real_meta"]["components"]
+                                if "innings" in comp:
+                                    st.write(f"Innings Index: `{comp['innings']}`")
+                        
+                    if "real_meta" in result and result["real_meta"]:
+                        meta = result["real_meta"]
+                        st.markdown("#### Statistical Context")
+                        meta_col1, meta_col2, meta_col3 = st.columns(3)
+                        meta_col1.caption(f"**Engine Formula:** {meta.get('formula', 'N/A')}")
+                        if "dismissals" in meta:
+                            meta_col2.caption(
+                                f"**Sample Balls:** {meta.get('balls', 0):,}  |  **Dismissals:** {meta.get('dismissals', 0)}"
+                            )
+                        else:
+                            meta_col2.caption(
+                                f"**Sample Overs:** {meta.get('overs', 0):.1f}  |  **Wickets:** {meta.get('wickets', 0)}"
+                            )
+                        meta_col3.caption(f"**Innings Coverage:** {meta.get('innings', 0)} matches")
 
                 st.divider()
 

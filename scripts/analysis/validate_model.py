@@ -25,6 +25,18 @@ import re
 import sys
 from pathlib import Path
 
+# ── Windows UTF-8 stdout fix (prevents charmap crashes from emoji in insights) ─
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import pandas as pd
 
 # ── Path setup ────────────────────────────────────────────────────────────────
@@ -45,6 +57,19 @@ from scripts.analysis.query_planner import (
     QueryPlanner, ExecutionPlan, FilterSet, is_comparative,
     _ASIA_COUNTRIES,
 )
+from scripts.analysis.metric_registry import compute_metric
+def _truncate_as_of(df: pd.DataFrame, as_of_date: str | None) -> pd.DataFrame:
+    """Truncate dataset to rows with date <= as_of_date (YYYY-MM-DD)."""
+    if not as_of_date or df.empty:
+        return df
+    if "date" not in df.columns:
+        return df
+    try:
+        cutoff = pd.to_datetime(as_of_date, errors="raise")
+        dates = pd.to_datetime(df["date"], errors="coerce")
+        return df[dates.notna() & (dates <= cutoff)]
+    except Exception:
+        return df
 
 def _lazy_prediction(df, canonical, is_batting, active_filters):
     """Lazy-load and run prediction engine only when called."""
@@ -108,11 +133,13 @@ _AMBIGUOUS_METRICS = {"average", "strike rate", "runs", "total runs"}
 _ENGINE_INSTANCE: IdentityEngine | None = None
 _PLAYER_ALIAS_CACHE: dict[tuple[str, str], list[str]] = {}  # (canonical, col) → [aliases]
 _BOWLER_STYLE_CACHE: dict[str, tuple[str, str]] = {}  # name → (type, hand)
+_SCORECARD_CACHE_FILE = ROOT / "data" / "scorecard_aliases_cache.json"
+_SCORECARD_CACHE: dict[str, list[str]] = {}  # (col:canonical) -> [aliases]
 
 def _get_engine() -> IdentityEngine:
     global _ENGINE_INSTANCE
     if _ENGINE_INSTANCE is None:
-        _ENGINE_INSTANCE = IdentityEngine()
+        _ENGINE_INSTANCE = IdentityEngine(SQLITE_DB)
     return _ENGINE_INSTANCE
 
 
@@ -168,12 +195,41 @@ def _bowler_style(engine: IdentityEngine, bowler_name: str) -> tuple[str, str]:
 
 
 def _get_match_phase(over: int) -> str:
-    """Classify over (0-indexed) into Powerplay / Middle / Death."""
+    """Legacy fallback classifier (0-indexed). Prefer _phase_from_context."""
     if over <= 5:
         return "Powerplay"
     if over <= 14:
         return "Middle"
     return "Death"
+
+
+def _phase_from_context(over_0: int, match_type: str | None, overs_limit: int | None) -> str:
+    """
+    Cricket rules (limited-overs):
+    - T20/T20I powerplay: overs 1–6  (0–5)
+    - ODI powerplay:      overs 1–10 (0–9)
+    - Death overs: last 5 overs of the innings (overs_limit-5 .. overs_limit-1)
+    """
+    mt = (match_type or "").lower()
+    ol = int(overs_limit) if overs_limit is not None and str(overs_limit).isdigit() else None
+    if ol is None:
+        # Infer typical overs limit from match type where possible
+        if "odi" in mt or mt in {"odm"}:
+            ol = 50
+        elif "t20" in mt:
+            ol = 20
+
+    if ol is not None and over_0 >= max(0, ol - 5):
+        return "Death"
+
+    # Powerplay
+    if "odi" in mt:
+        return "Powerplay" if over_0 <= 9 else "Middle"
+    if "t20" in mt:
+        return "Powerplay" if over_0 <= 5 else "Middle"
+
+    # Unknown / Tests: fall back to coarse bins
+    return _get_match_phase(over_0)
 
 
 def _resolve_player(engine: IdentityEngine, name: str) -> dict | None:
@@ -199,6 +255,7 @@ def _get_required_columns(metric: str, filters: dict) -> list[str]:
             elif key == "format": 
                 cols.update(["match_type", "competition", "batting_team", "bowling_team"])
             elif key == "season": cols.add("date")
+            elif key == "as_of_date": cols.add("date")
             elif key == "day_night": cols.add("day_night")
             elif key == "toss_winner": cols.update(["toss_winner", "batting_team"])
             elif key == "toss_decision": cols.add("toss_decision")
@@ -211,7 +268,9 @@ def _get_required_columns(metric: str, filters: dict) -> list[str]:
             elif key == "opposition": cols.update(["bowling_team", "batting_team"])
             elif key == "bowler_type": cols.add("bowler_type")
             elif key == "bowler_hand": cols.add("bowler_hand")
-            elif key == "match_phase": cols.update(["match_phase", "over"])
+            elif key == "match_phase":
+                # If match_phase isn't precomputed, we may need match metadata to classify it.
+                cols.update(["match_phase", "over", "match_type", "overs_limit"])
             elif key == "batter_vs_bowler_type": cols.add("bowler_type")
             elif key == "_is_comparison_half": cols.add("country")
 
@@ -236,9 +295,24 @@ def _get_scorecard_aliases(col: str, canonical_name: str, engine: IdentityEngine
     """
     Cached scorecard string lookup.
     """
-    cache_key = (canonical_name, col)
+    cache_key = f"{col}:{canonical_name}"
+    
+    # 1. Memory Cache
     if cache_key in _PLAYER_ALIAS_CACHE:
         return _PLAYER_ALIAS_CACHE[cache_key]
+
+    # 2. Persistent Disk Cache
+    global _SCORECARD_CACHE
+    if not _SCORECARD_CACHE and _SCORECARD_CACHE_FILE.exists():
+        try:
+            with open(_SCORECARD_CACHE_FILE, "r") as f:
+                _SCORECARD_CACHE = json.load(f)
+        except Exception:
+            pass
+            
+    if cache_key in _SCORECARD_CACHE:
+        _PLAYER_ALIAS_CACHE[cache_key] = _SCORECARD_CACHE[cache_key]
+        return _SCORECARD_CACHE[cache_key]
 
     import duckdb as _duckdb
     last_name = canonical_name.split()[-1]
@@ -311,8 +385,19 @@ def _get_scorecard_aliases(col: str, canonical_name: str, engine: IdentityEngine
     if canonical_name not in aliases:
         aliases.append(canonical_name)
 
-    _PLAYER_ALIAS_CACHE[cache_key] = list(set(aliases))
-    return _PLAYER_ALIAS_CACHE[cache_key]
+    res_list = list(set(aliases))
+    _PLAYER_ALIAS_CACHE[cache_key] = res_list
+    
+    # Update persistent cache
+    _SCORECARD_CACHE[cache_key] = res_list
+    try:
+        _SCORECARD_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SCORECARD_CACHE_FILE, "w") as f:
+            json.dump(_SCORECARD_CACHE, f, indent=2)
+    except Exception:
+        pass
+
+    return res_list
 
 # ── Validation Utilities (Fix 1, Fix 8) ──────────────────────────────────────
 
@@ -617,7 +702,7 @@ def apply_filters(df: pd.DataFrame, filters: dict | None = None, engine: Identit
             ns_canonical = ns_res["canonical_name"]
             ns_aliases = _get_scorecard_aliases(
                 "non_striker", ns_canonical, engine,
-                str(ROOT / "cricket.db")
+                SQLITE_DB
             )
             if ns_aliases:
                 print(f"    [OK] non_striker aliases for '{ns_canonical}': {ns_aliases}")
@@ -655,7 +740,7 @@ def apply_filters(df: pd.DataFrame, filters: dict | None = None, engine: Identit
             b_canonical = b_res["canonical_name"]
             b_aliases = _get_scorecard_aliases(
                 "bowler", b_canonical, engine,
-                str(ROOT / "cricket.db")
+                SQLITE_DB
             )
             if b_aliases:
                 print(f"    [OK] bowler aliases for '{b_canonical}': {b_aliases}")
@@ -745,7 +830,7 @@ def apply_filters(df: pd.DataFrame, filters: dict | None = None, engine: Identit
             hvh_canonical = res["canonical_name"]
             hvh_aliases = _get_scorecard_aliases(
                 "bowler", hvh_canonical, engine,
-                str(ROOT / "cricket.db")
+                SQLITE_DB
             )
             if hvh_aliases:
                 print(f"    [OK] batter_vs_bowler aliases for '{hvh_canonical}': {hvh_aliases}")
@@ -779,12 +864,28 @@ def apply_filters(df: pd.DataFrame, filters: dict | None = None, engine: Identit
             df = df[df["match_phase"].str.lower() == match_phase.lower()]
             _assert_filter_effective(df_before, df, "match_phase")
         elif "over" in df.columns:
-            # Vectorized match phase classification
-            def _vec_phase(s: pd.Series) -> pd.Series:
-                return pd.cut(s, bins=[-1, 5, 14, 100], labels=["Powerplay", "Middle", "Death"])
+            # Vectorized rule-based match phase classification
             df_before = df
-            df = df[_vec_phase(df["over"]).str.lower() == match_phase.lower()]
-            _assert_filter_effective(df_before, df, "over")
+            overs = df["over"].astype(int)
+            
+            # Default bins (Test/Generic)
+            phase_series = pd.cut(overs, bins=[-1, 5, 14, 100], labels=["Powerplay", "Middle", "Death"])
+            
+            # Refine based on match_type if available
+            if "match_type" in df.columns:
+                mt = df["match_type"].str.lower()
+                # T20 logic (0-5, 6-14, 15-19)
+                t20_mask = mt.str.contains("t20")
+                if t20_mask.any():
+                    phase_series = phase_series.mask(t20_mask, pd.cut(overs, bins=[-1, 5, 14, 20], labels=["Powerplay", "Middle", "Death"]))
+                
+                # ODI logic (0-9, 10-39, 40-49)
+                odi_mask = mt.str.contains("odi|odm")
+                if odi_mask.any():
+                    phase_series = phase_series.mask(odi_mask, pd.cut(overs, bins=[-1, 9, 39, 50], labels=["Powerplay", "Middle", "Death"]))
+
+            df = df[phase_series.astype(str).str.lower() == match_phase.lower()]
+            _assert_filter_effective(df_before, df, "match_phase")
 
     return df
 
@@ -795,129 +896,74 @@ def _batting_metrics(df: pd.DataFrame, metric_str: str) -> dict | None:
     """Compute a batting-side metric from filtered deliveries."""
     if df.empty:
         return None
+    # Prefer deterministic formula registry for key metrics
+    metric_canonical = None
+    ms = metric_str.lower().strip()
+    if "batting average" in ms or (ms == "average"):
+        metric_canonical = "Batting Average"
+    elif "strike rate" in ms:
+        metric_canonical = "Strike Rate"
+    elif "total runs" in ms or ms == "runs":
+        metric_canonical = "Total Runs"
+    elif "high score" in ms:
+        metric_canonical = "High Score"
+    elif "milestone" in ms or "centur" in ms or "fift" in ms:
+        metric_canonical = "Milestones"
+    elif "dot" in ms:
+        metric_canonical = "Dot Ball %"
+    elif "boundary" in ms:
+        metric_canonical = "Boundary %"
+    elif "balls" in ms:
+        metric_canonical = "Balls Faced"
 
+    if metric_canonical:
+        res = compute_metric(metric_canonical, df)
+        if res:
+            if res.get("status") == "insufficient_data":
+                return res
+            return res
+
+    # Fallback to legacy behavior for metrics not yet in registry
     total_runs = int(df["runs_batter"].sum()) if "runs_batter" in df.columns else 0
     wides = int(df["extras_wides"].sum()) if "extras_wides" in df.columns else 0
     balls_faced = len(df) - wides
     dismissals = int(df["is_wicket"].sum()) if "is_wicket" in df.columns else 0
     innings_count = int(df["match_id"].nunique()) if "match_id" in df.columns else (1 if balls_faced > 0 else 0)
-
-    meta = {
-        "runs": total_runs,
-        "balls": balls_faced,
-        "dismissals": dismissals,
-        "innings": innings_count,
-        "formula": "Runs"
-    }
-    
-    val = float(total_runs)
-
-    if "average" in metric_str:
-        meta["formula"] = "Runs / Dismissals"
-        val = float(total_runs / dismissals) if dismissals > 0 else float(total_runs)
-    elif "strike rate" in metric_str:
-        meta["formula"] = "(Runs / Balls) * 100"
-        val = float((total_runs / balls_faced) * 100) if balls_faced > 0 else 0.0
-    elif "total runs" in metric_str or metric_str == "runs":
-        meta["formula"] = "Sum(Runs)"
-        val = float(total_runs)
-    elif "balls faced" in metric_str:
-        meta["formula"] = "Count(Deliveries)"
-        val = float(balls_faced)
-    elif "dot ball" in metric_str:
-        meta["formula"] = "(Dots / Balls) * 100"
-        if balls_faced == 0:
-            val = 0.0
-        elif "runs_batter" in df.columns:
-            dot_balls = int((df["runs_batter"] == 0).sum())
-            val = float(dot_balls / balls_faced * 100)
-    elif "boundary" in metric_str:
-        meta["formula"] = "(Boundaries / Balls) * 100"
-        if balls_faced == 0:
-            val = 0.0
-        elif "runs_batter" in df.columns:
-            boundaries = int(df["runs_batter"].isin([4, 6]).sum())
-            val = float(boundaries / balls_faced * 100)
-    elif "high score" in metric_str:
-        meta["formula"] = "Max(Innings Runs)"
-        if "match_id" in df.columns and "innings" in df.columns and "runs_batter" in df.columns:
-            innings_runs = df.groupby(["match_id", "innings"])["runs_batter"].sum()
-            val = float(innings_runs.max())
-        else:
-            val = float(total_runs)
-    elif "milestone" in metric_str:
-        meta["formula"] = "Count(Innings >= 100)"
-        if "match_id" in df.columns and "innings" in df.columns and "runs_batter" in df.columns:
-            innings_runs = df.groupby(["match_id", "innings"])["runs_batter"].sum()
-            val = float(int((innings_runs >= 100).sum()))
-        else:
-            val = 0.0
-    elif "partnership" in metric_str:
-        val = float(total_runs)
-
-    return {"value": val, "meta": meta}
+    meta = {"runs": total_runs, "balls": balls_faced, "dismissals": dismissals, "innings": innings_count, "formula": "Runs"}
+    return {"value": float(total_runs), "meta": meta}
 
 
 def _bowling_metrics(df: pd.DataFrame, metric_str: str) -> dict | None:
     """Compute a bowling-side metric from filtered deliveries."""
     if df.empty:
         return None
-
-    wickets = int(df["is_bowler_wicket"].sum()) if "is_bowler_wicket" in df.columns else 0
-    # Align with standard bowling definitions:
-    # - Byes/leg byes are NOT charged to the bowler.
-    # - Wides/no-balls ARE charged to the bowler.
-    runs_total = int(df["runs_total"].sum()) if "runs_total" in df.columns else 0
-    byes = int(df["extras_byes"].sum()) if "extras_byes" in df.columns else 0
-    legbyes = int(df["extras_legbyes"].sum()) if "extras_legbyes" in df.columns else 0
-    runs_conceded = runs_total - byes - legbyes
-    total_deliveries = len(df)
-    wides = int(df["extras_wides"].sum()) if "extras_wides" in df.columns else 0
-    noballs = int(df["extras_noballs"].sum()) if "extras_noballs" in df.columns else 0
+    # Prefer deterministic formula registry for key metrics
+    ms = metric_str.lower().strip()
+    metric_canonical = None
+    if "economy" in ms:
+        metric_canonical = "Economy Rate"
+    elif "wickets" in ms:
+        metric_canonical = "Wickets"
+    elif "strike rate" in ms:
+        metric_canonical = "Bowling Strike Rate"
+    elif "average" in ms:
+        metric_canonical = "Bowling Average"
+    elif "dots" in ms:
+        metric_canonical = "Dots Forced"
+    elif "extras" in ms:
+        metric_canonical = "Extras Conceded"
     
-    legal_deliveries = total_deliveries - wides - noballs
-    overs_bowled = legal_deliveries / 6.0
-    innings_count = int(df["match_id"].nunique()) if "match_id" in df.columns else (1 if legal_deliveries > 0 else 0)
+    if metric_canonical:
+        res = compute_metric(metric_canonical, df)
+        if res:
+            if res.get("status") == "insufficient_data":
+                return res
+            return res
 
-    meta = {
-        "wickets": wickets,
-        "overs": overs_bowled,
-        "runs_conceded": runs_conceded,
-        "innings": innings_count,
-        "formula": "Runs Conceded"
-    }
-
-    val = float(runs_conceded)
-
-    if "wickets" in metric_str:
-        meta["formula"] = "Sum(Wickets)"
-        val = float(wickets)
-    elif "economy" in metric_str:
-        meta["formula"] = "Runs Conceded / Overs"
-        val = float(runs_conceded / overs_bowled) if overs_bowled > 0 else None
-    elif "bowling average" in metric_str or "average" in metric_str:
-        meta["formula"] = "Runs Conceded / Wickets"
-        val = float(runs_conceded / wickets) if wickets > 0 else None
-    elif "bowling strike rate" in metric_str or "strike rate" in metric_str:
-        meta["formula"] = "Legal Deliveries / Wickets"
-        val = float(legal_deliveries / wickets) if wickets > 0 else None
-    elif "dots" in metric_str or "dots forced" in metric_str:
-        meta["formula"] = "Count(Dot Balls)"
-        if "runs_total" in df.columns:
-            val = float((df["runs_total"] == 0).sum())
-    elif "extras" in metric_str:
-        meta["formula"] = "Sum(Extras)"
-        extra_cols = [c for c in ["extras_wides", "extras_noballs", "extras_byes",
-                                   "extras_legbyes"] if c in df.columns]
-        if extra_cols:
-            val = float(df[extra_cols].sum().sum())
-    elif "runs conceded" in metric_str:
-        val = float(runs_conceded)
-
-    if val is None:
-        return None
-        
-    return {"value": val, "meta": meta}
+    # Fallback: legacy minimal metadata
+    wickets = int(df["is_bowler_wicket"].sum()) if "is_bowler_wicket" in df.columns else 0
+    runs_total = int(df["runs_total"].sum()) if "runs_total" in df.columns else 0
+    return {"value": float(runs_total), "meta": {"wickets": wickets, "runs_total": runs_total, "formula": "Runs Total"}}
 
 
 def calculate_real_value(df: pd.DataFrame, canonical_subject: str,
@@ -984,7 +1030,7 @@ import sqlite3
 
 def _load_subject_dataframe(subject_col: str, canonical_subject: str, engine: IdentityEngine, 
                             metric: str = "average", filters: dict = {}) -> pd.DataFrame | None:
-    db_path = str(ROOT / "cricket.db")
+    db_path = SQLITE_DB
     
     # Priority: DuckDB > SQLite
     use_duckdb = os.path.exists(DUCKDB_PATH)
@@ -1095,6 +1141,7 @@ def _filterset_to_dict(fs: FilterSet) -> dict:
     d["innings"]          = fs.innings
     d["match_phase"]      = fs.match_phase
     d["over_number"]      = fs.over_number
+    d["over_range"]       = fs.over_range   # Fix: forward over_range filter
     d["batting_position"] = fs.batting_position
     d["opposition"]       = fs.opposition
     d["home_away"]        = fs.home_away
@@ -1176,20 +1223,46 @@ def _standard_output(real_data: dict, metric: str, canonical: str,
     """Build the production-grade standard output dict."""
     real_val  = real_data["value"]
     real_meta = real_data["meta"]
-    sample_balls = real_meta.get("balls", real_meta.get("overs", 0) * 6)
+    # Extraction logic for sample size (handles both legacy and registry formats)
+    sample_balls = real_meta.get("balls")
+    if sample_balls is None:
+        sample_balls = real_meta.get("sample_size", {}).get("balls", real_meta.get("overs", 0) * 6)
     confidence   = real_meta.get("confidence", min(1.0, sample_balls / 600))
 
-    if real_val == 0:
-        accuracy = 0.0 if claimed_val != 0 else 100.0
+    if claimed_val is None:
+        accuracy = 100.0
+        verdict, emoji = "Informational", "Info"
     else:
-        denom    = max(float(claimed_val or 0), float(real_val))
-        accuracy = (1.0 - abs(float(claimed_val or 0) - real_val) / denom) * 100.0
-    accuracy = max(0.0, min(100.0, accuracy))
+        if real_val == 0:
+            accuracy = 100.0 if claimed_val == 0 else 0.0
+        else:
+            delta = abs(float(claimed_val) - real_val)
+            m_lower = metric.lower()
 
-    if accuracy >= 95:   verdict, emoji = "Spot On",    "Spot On"
-    elif accuracy >= 80: verdict, emoji = "Mostly True", "Mostly True"
-    elif accuracy >= 50: verdict, emoji = "Half True",  "Half True"
-    else:                verdict, emoji = "False",      "False"
+            # Format-Aware Variable Tolerances
+            if "average" in m_lower or "economy" in m_lower or "rate" in m_lower:
+                # Even a delta of 1.0 is huge for average / economy / strike rate
+                error_ratio = (delta / real_val) * 3.0
+            elif "runs" in m_lower or "balls" in m_lower or "score" in m_lower:
+                # Allow a slightly wider absolute margin (discount first 10.0 runs/balls of delta)
+                # but apply a scale factor of 2.5 to the remaining error to drop the tier quickly
+                effective_delta = max(0.0, delta - 10.0)
+                error_ratio = (effective_delta / real_val) * 2.5
+            else:
+                error_ratio = delta / real_val
+
+            accuracy = max(0.0, (1.0 - error_ratio) * 100.0)
+        accuracy = max(0.0, min(100.0, accuracy))
+
+        # Enforce Strict Compressed Thresholding
+        if accuracy >= 99.0:
+            verdict, emoji = "VERIFIED_FACT", "VERIFIED_FACT"
+        elif accuracy >= 95.0:
+            verdict, emoji = "MINOR_DEVIATION", "MINOR_DEVIATION"
+        elif accuracy >= 85.0:
+            verdict, emoji = "INACCURATE", "INACCURATE"
+        else:
+            verdict, emoji = "FALSE", "FALSE"
 
     active = {k: v for k, v in _filterset_to_dict(fs).items()
               if v is not None and not k.startswith("_")}
@@ -1216,7 +1289,8 @@ def _standard_output(real_data: dict, metric: str, canonical: str,
 
 def _execute_single_plan(
     plan: ExecutionPlan, engine: IdentityEngine,
-    df_full: pd.DataFrame, metric: str, canonical: str
+    df_full: pd.DataFrame, metric: str, canonical: str,
+    skip_predictions: bool = False
 ) -> dict:
     """Execute a single (non-comparative) plan."""
     fs = plan.primary
@@ -1248,6 +1322,17 @@ def _execute_single_plan(
         _batting_metrics(df, metric.lower()) if fs.is_batting
         else _bowling_metrics(df, metric.lower())
     )
+    if isinstance(real_data, dict) and real_data.get("status") == "insufficient_data":
+        msg = f"Insufficient data to compute '{metric}' for the given filters."
+        return {
+            "status": "insufficient_data",
+            "message": msg,
+            "subject": canonical,
+            "metric": metric,
+            "sample_size": int(real_data.get("meta", {}).get("sample_size", {}).get("balls", 0)),
+            "execution_mode": EXECUTION_MODE,
+            "real_meta": real_data.get("meta", {}),
+        }
     if real_data is None:
         msg = f"Cannot compute '{metric}' — required columns may be absent."
         print(f"    [X] {msg}")
@@ -1278,7 +1363,9 @@ def _execute_single_plan(
         if insight_text:
             print(insight_text)
 
-    preds = _lazy_prediction(df_full, canonical, fs.is_batting, _filterset_to_dict(fs))
+    preds = {}
+    if not skip_predictions:
+        preds = _lazy_prediction(df_full, canonical, fs.is_batting, _filterset_to_dict(fs))
 
     return _standard_output(
         real_data, metric, canonical, fs, plan.claimed_value,
@@ -1377,7 +1464,22 @@ def _execute_comparison_plan(
     if engine.players_db.empty:
         print("    [WARN]  Player DB is empty — resolution may fail.")
 
-    query_res = engine.resolve_for_query(subject)
+    # Contextual identity resolution: bias toward batter/bowler based on metric+filters.
+    metric_hint = (metric or "").lower()
+    prefer_role = ""
+    if any(m in metric_hint for m in _BOWLING_SPECIFIC):
+        prefer_role = "bowling"
+    elif any(m in metric_hint for m in _BATTING_SPECIFIC):
+        prefer_role = "batting"
+    prefer_bowling_type = ""
+    if (filters.get("bowler_type") or filters.get("batter_vs_bowler_type")):
+        bt = str(filters.get("bowler_type") or filters.get("batter_vs_bowler_type") or "").lower()
+        prefer_bowling_type = "spin" if "spin" in bt else ("pace" if "pace" in bt or "fast" in bt or "seam" in bt else "")
+    query_res = engine.resolve(subject, context={
+        "prefer_role": prefer_role,
+        "prefer_bowling_type": prefer_bowling_type,
+        "prefer_country": (filters.get("country") or ""),
+    })
     if "needs_disambiguation" in query_res.get("status", ""):
         opts = [f"{c['name']} ({c['meta'].get('country','')})" for c in query_res['candidates']]
         msg = f"Which '{subject}' do you mean? Options: {', '.join(opts)}"
@@ -1449,21 +1551,29 @@ def _execute_comparison_plan(
     print(f"    Actual  : {real_val:.4f}")
 
     if real_val == 0:
-        accuracy = 0.0 if claimed_val != 0 else 100.0
+        accuracy = 100.0 if claimed_val == 0 else 0.0
     else:
-        denom    = max(float(claimed_val), float(real_val))
-        accuracy = (1.0 - abs(float(claimed_val) - real_val) / denom) * 100.0
+        delta = abs(float(claimed_val) - real_val)
+        m_lower = metric.lower()
+        if "average" in m_lower or "economy" in m_lower or "rate" in m_lower:
+            error_ratio = (delta / real_val) * 3.0
+        elif "runs" in m_lower or "balls" in m_lower or "score" in m_lower:
+            effective_delta = max(0.0, delta - 10.0)
+            error_ratio = (effective_delta / real_val) * 2.5
+        else:
+            error_ratio = delta / real_val
+        accuracy = max(0.0, (1.0 - error_ratio) * 100.0)
 
     accuracy = max(0.0, min(100.0, accuracy))
 
-    if accuracy >= 95:
-        verdict, emoji = "Spot On",    "[TARGET]"
-    elif accuracy >= 80:
-        verdict, emoji = "Mostly True","[YES]"
-    elif accuracy >= 50:
-        verdict, emoji = "Half True",  "[WARN]"
+    if accuracy >= 99.0:
+        verdict, emoji = "VERIFIED_FACT", "[TARGET]"
+    elif accuracy >= 95.0:
+        verdict, emoji = "MINOR_DEVIATION", "[YES]"
+    elif accuracy >= 85.0:
+        verdict, emoji = "INACCURATE", "[WARN]"
     else:
-        verdict, emoji = "False",      "[FAIL]"
+        verdict, emoji = "FALSE", "[FAIL]"
 
     print(f"\n{'='*50}")
     print(f"  VERDICT : {verdict} {emoji}  ({accuracy:.1f}% accurate)")
@@ -1505,28 +1615,19 @@ def _execute_comparison_plan(
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
 
-def validate_claim(claim_string: str) -> dict:
+def validate_parsed_claim(parsed: dict, claim_string: str, skip_predictions: bool = False) -> dict:
     """
-    Full production pipeline:
-      NL -> Parser -> QueryPlanner -> ExecutionPlan -> Engine -> Output
-
-    validate_model.py ONLY: applies filters, computes metrics.
-    It does NOT: interpret comparisons, infer missing schema, or guess entities.
+    Inner verification pipeline runner using a pre-parsed claim filter payload.
     """
-    sep = "-" * 58
-    print(f"\n[{sep}]")
-    print(f"  CLAIM: \"{claim_string}\"")
-    print(f"[{sep}]\n")
-
-    # ─ Phase 1: Parse ──────────────────────────────────────────────────────────
-    print("[Phase 1] Semantic Parsing ...")
-    parsed = parse_claim(claim_string)
-    print(f"    >> Parsed JSON:\n{json.dumps(parsed, indent=6)}")
-
     subject     = parsed.get("subject")
+    subject_type = parsed.get("subject_type")
+    as_of_date = parsed.get("as_of_date")
     metric      = parsed.get("metric")
     claimed_val = parsed.get("claimed_value")
     filters     = parsed.get("filters", {}) or {}
+    # Carry temporal anchor down into the loader/filter layer so date is projected.
+    if as_of_date:
+        filters["as_of_date"] = as_of_date
 
     # ── Metric normalisation: override LLM if user explicitly stated bowling/batting ──
     claim_lower = claim_string.lower()
@@ -1555,21 +1656,37 @@ def validate_claim(claim_string: str) -> dict:
     if ("day night" in claim_lower or "day-night" in claim_lower) and not filters.get("day_night"):
         filters["day_night"] = "day-night"
 
-
-    if claimed_val is None:
-        claimed_val = 0.0
-
     if not subject:
         msg = "Could not identify a primary subject (player) from your query."
         print(f"    [X] {msg}")
         return {"status": "error", "message": msg, "execution_mode": EXECUTION_MODE}
+
+    # Subject anchoring: prevent trying to resolve team/country aggregates as a player
+    if subject_type in {"team", "country"}:
+        msg = f"SubjectTypeMismatch: query subject is '{subject_type}', but this pipeline currently supports player subjects only."
+        return {"status": "subject_type_mismatch", "message": msg, "execution_mode": EXECUTION_MODE}
 
     # ─ Phase 2: Identity Resolution ────────────────────────────────────────────
     print("\n[Phase 2] Identity Resolution ...")
     engine = _get_engine()
     _load_bowler_db()
 
-    query_res = engine.resolve_for_query(subject)
+    # Contextual identity resolution: bias toward batter/bowler based on metric+filters.
+    metric_hint = (metric or "").lower()
+    prefer_role = ""
+    if any(m in metric_hint for m in _BOWLING_SPECIFIC):
+        prefer_role = "bowling"
+    elif any(m in metric_hint for m in _BATTING_SPECIFIC):
+        prefer_role = "batting"
+    prefer_bowling_type = ""
+    if (filters.get("bowler_type") or filters.get("batter_vs_bowler_type")):
+        bt = str(filters.get("bowler_type") or filters.get("batter_vs_bowler_type") or "").lower()
+        prefer_bowling_type = "spin" if "spin" in bt else ("pace" if "pace" in bt or "fast" in bt or "seam" in bt else "")
+    query_res = engine.resolve(subject, context={
+        "prefer_role": prefer_role,
+        "prefer_bowling_type": prefer_bowling_type,
+        "prefer_country": (filters.get("country") or ""),
+    })
     if query_res.get("status") == "needs_disambiguation":
         opts = [f"{c['name']} ({c['meta'].get('country', '')})" for c in query_res.get("candidates", [])]
         msg = f"Which '{subject}' do you mean? Options: {', '.join(opts)}"
@@ -1625,21 +1742,26 @@ def validate_claim(claim_string: str) -> dict:
 
         print(f"    >> Loaded {len(df_full):,} rows for '{canonical}'.")
 
+        # Temporal anchor: truncate as-of date to avoid future data polluting historical claims
+        if as_of_date:
+            before = len(df_full)
+            df_full = _truncate_as_of(df_full, as_of_date)
+            print(f"    >> as_of_date={as_of_date}: {before:,} → {len(df_full):,} rows")
+
         integrity_warnings = _validate_dataset_integrity(df_full, canonical)
         for _, msg in integrity_warnings.items():
             print(f"    [INTEGRITY-WARN] {msg}")
 
         # ─ Phase 5: Execution ──────────────────────────────────────────────────
         if plan.type == "comparison":
-            return _execute_comparison_plan(plan, engine, df_full, metric, canonical)
+            result = _execute_comparison_plan(plan, engine, df_full, metric, canonical)
         else:
-            result = _execute_single_plan(plan, engine, df_full, metric, canonical)
+            result = _execute_single_plan(plan, engine, df_full, metric, canonical, skip_predictions=skip_predictions)
     except FeatureMissingError as e:
         msg = str(e)
         print(f"    [X] {msg}")
         return {"status": "no_data", "message": msg, "execution_mode": EXECUTION_MODE}
     except ValueError as e:
-        # STRICT filter enforcement (e.g., day_night not present) should surface as no_data.
         msg = str(e)
         print(f"    [X] {msg}")
         return {"status": "no_data", "message": msg, "execution_mode": EXECUTION_MODE}
@@ -1652,8 +1774,12 @@ def validate_claim(claim_string: str) -> dict:
     if result.get("status") == "ok":
         rv = result["real_val"]
         print(f"\n{'='*50}")
-        print(f"  VERDICT : {result['verdict']}  ({result['accuracy_pct']:.1f}% accurate)")
-        print(f"  CLAIMED : {claimed_val}   |   ACTUAL : {rv:.4f}")
+        if result.get("verdict") == "Informational":
+            print(f"  VERDICT : Informational")
+            print(f"  VALUE   : {rv:.4f}")
+        else:
+            print(f"  VERDICT : {result['verdict']}  ({result['accuracy_pct']:.1f}% accurate)")
+            print(f"  CLAIMED : {claimed_val}   |   ACTUAL : {rv:.4f}")
         print(f"  METRIC  : {metric}")
         print(f"  SUBJECT : {canonical}")
         print(f"  SAMPLE  : {result['sample_size']:,} balls | CONFIDENCE: {result['confidence']:.0%}")
@@ -1663,7 +1789,66 @@ def validate_claim(claim_string: str) -> dict:
             print(f"  WARNING : {result['real_meta']['warning']}")
         print(f"{'='*50}\n")
 
+    # Ensure subject and metric are populated on the result dict for single claims
+    result.setdefault("subject", canonical)
+    result.setdefault("metric", metric)
+    result.setdefault("claimed_value", claimed_val)
     return result
+
+
+def validate_claim(claim_string: str, skip_predictions: bool = False) -> dict:
+    """
+    Full production pipeline with support for both single and multi-claim inputs.
+    """
+    sep = "-" * 58
+    print(f"\n[{sep}]")
+    print(f"  CLAIM: \"{claim_string}\"")
+    print(f"[{sep}]\n")
+
+    # ─ Phase 1: Parse ──────────────────────────────────────────────────────────
+    print("[Phase 1] Semantic Parsing via parse_paragraph...")
+    from scripts.analysis.ai_parser import parse_paragraph
+    
+    try:
+        parsed_list = parse_paragraph(claim_string)
+    except Exception as e:
+        msg = f"Failed to parse claim paragraph: {e}"
+        print(f"    [X] {msg}")
+        return {"status": "error", "message": msg, "execution_mode": EXECUTION_MODE}
+
+    if not parsed_list:
+        msg = "No structural claims could be extracted from the input text."
+        print(f"    [X] {msg}")
+        return {"status": "error", "message": msg, "execution_mode": EXECUTION_MODE}
+
+    print(f"    >> Parsed {len(parsed_list)} claims.")
+
+    # Proceed based on count of decomposed claims
+    if len(parsed_list) == 1:
+        # Backward compatibility mode for single claims
+        parsed = parsed_list[0]
+        print(f"    >> Parsed JSON:\n{json.dumps(parsed, indent=6)}")
+        return validate_parsed_claim(parsed, claim_string, skip_predictions=skip_predictions)
+    else:
+        # Multi-claim mode
+        verdicts = []
+        for idx, p in enumerate(parsed_list, 1):
+            print(f"\nEvaluating Claim #{idx}/{len(parsed_list)}: {p.get('subject')} - {p.get('metric')}")
+            print(f"Parsed JSON:\n{json.dumps(p, indent=6)}")
+            
+            # Formulate a pseudo-claim string representing this sub-claim for validation prints
+            sub_claim = f"{p.get('subject')} {p.get('metric')} = {p.get('claimed_value')}"
+            
+            v = validate_parsed_claim(p, sub_claim, skip_predictions=skip_predictions)
+            v["claim"] = sub_claim
+            verdicts.append(v)
+
+        return {
+            "is_multi_claim": True,
+            "verdicts": verdicts,
+            "status": "ok",
+            "claim": claim_string
+        }
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
