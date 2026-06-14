@@ -337,7 +337,7 @@ def density_chunk_paragraphs(paragraphs: Iterator[str]) -> list[str]:
     kept: list[bool] = [False] * n
 
     # Sliding window: mark sentences in high-density windows
-    window = _DENSITY_WINDOW
+    window = min(_DENSITY_WINDOW, n)
     for i in range(n - window + 1):
         window_scores = scores[i: i + window]
         positive = sum(1 for sc in window_scores if sc > 0)
@@ -371,8 +371,8 @@ def density_chunk_paragraphs(paragraphs: Iterator[str]) -> list[str]:
 
     discarded = sum(1 for k in kept if not k)
     log.info(
-        f"Density chunker: {n} sentences → {sum(kept)} kept, "
-        f"{discarded} discarded ({round(100*discarded/max(n,1))}% pruned) → {len(chunks)} chunk(s)."
+        f"Density chunker: {n} sentences -> {sum(kept)} kept, "
+        f"{discarded} discarded ({round(100*discarded/max(n,1))}% pruned) -> {len(chunks)} chunk(s)."
     )
     return chunks
 
@@ -646,7 +646,7 @@ def parse_document_claims(
     # ── Stage 2b: Numerical Density Chunking ───────────────────────────────────
     chunks = density_chunk_paragraphs(filtered_paragraphs)
     t_chunk = time.perf_counter()
-    log.info(f"Filter+Chunk complete in {round((t_chunk - t_filter)*1000, 1)}ms → {len(chunks)} chunk(s).")
+    log.info(f"Filter+Chunk complete in {round((t_chunk - t_filter)*1000, 1)}ms -> {len(chunks)} chunk(s).")
 
     # ── Stage 3: Claim Isolation ───────────────────────────────────────────────
     if not chunks:
@@ -667,7 +667,7 @@ def parse_document_claims(
         }]
 
     t_isolate = time.perf_counter()
-    log.info(f"Claim isolation in {round((t_isolate - t_chunk)*1000, 1)}ms → {len(claims)} claim(s).")
+    log.info(f"Claim isolation in {round((t_isolate - t_chunk)*1000, 1)}ms -> {len(claims)} claim(s).")
 
     # ── Stage 4: Pre-warm IdentityEngine (avoid thread race on first load) ─────
     try:
@@ -677,8 +677,8 @@ def parse_document_claims(
 
     # ── Stage 5: Parallel Verdict Dispatch ─────────────────────────────────────
     verdicts: list[dict] = []
-    max_workers = min(len(claims), 8)
-    log.info(f"Dispatching {len(claims)} claim(s) → ThreadPoolExecutor({max_workers} workers)…")
+    max_workers = min(len(claims), 3) # Reduced to 3 to prevent Groq API synchronized burst limit livelocks
+    log.info(f"Dispatching {len(claims)} claim(s) -> ThreadPoolExecutor({max_workers} workers)…")
 
     # Submit all futures at once for maximum concurrency
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -692,7 +692,7 @@ def parse_document_claims(
             try:
                 claim_results = future.result()
                 verdicts.extend(claim_results)
-                log.info(f"[{idx}/{len(claims)}] '{claim[:50]}…' → {len(claim_results)} verdict(s).")
+                log.info(f"[{idx}/{len(claims)}] '{claim[:50]}…' -> {len(claim_results)} verdict(s).")
             except Exception as thread_exc:
                 log.error(f"[{idx}/{len(claims)}] Thread failed for '{claim[:50]}…': {thread_exc}")
                 verdicts.append({
@@ -742,7 +742,7 @@ if __name__ == "__main__":
         print(json.dumps(results, indent=2, default=str))
     else:
         for i, v in enumerate(results, 1):
-            print(f"\n{'─'*60}")
+            print(f"\n{'-'*60}")
             print(f"  Claim [{i}]: {v.get('claim', 'N/A')[:80]}")
             print(f"  Status : {v.get('status')}")
             print(f"  Verdict: {v.get('verdict')}")
