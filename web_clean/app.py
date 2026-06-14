@@ -66,7 +66,17 @@ def get_db_connection():
             status_code=500,
             detail=f"Database file not found at {DB_PATH}. Please run the extraction script first."
         )
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode = WAL;")
+        cur.execute("PRAGMA synchronous = NORMAL;")
+        cur.execute("PRAGMA cache_size = -131072;")
+        cur.execute("PRAGMA temp_store = MEMORY;")
+        cur.execute("PRAGMA busy_timeout = 30000;")
+        cur.close()
+    except Exception as e:
+        print(f"[DB-WARN] Failed to configure SQLite PRAGMAs: {e}")
     conn.row_factory = sqlite3.Row
     return conn
 

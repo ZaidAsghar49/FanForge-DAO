@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 
 # ── Windows UTF-8 stdout fix (prevents charmap crashes from emoji in insights) ─
@@ -155,16 +156,39 @@ _AMBIGUOUS_METRICS = {"average", "strike rate", "runs", "total runs"}
 
 # ── Global Cache / Singleton State ───────────────────────────────────────────
 _ENGINE_INSTANCE: IdentityEngine | None = None
-_PLAYER_ALIAS_CACHE: dict[tuple[str, str], list[str]] = {}  # (canonical, col) → [aliases]
+_PLAYER_ALIAS_CACHE: dict[str, list[str]] = {}  # cache_key -> [aliases]
 _BOWLER_STYLE_CACHE: dict[str, tuple[str, str]] = {}  # name → (type, hand)
 _SCORECARD_CACHE_FILE = ROOT / "data" / "scorecard_aliases_cache.json"
 _SCORECARD_CACHE: dict[str, list[str]] = {}  # (col:canonical) -> [aliases]
+_SCORECARD_LOCK = threading.Lock()
+
+try:
+    if _SCORECARD_CACHE_FILE.exists():
+        with open(_SCORECARD_CACHE_FILE, "r", encoding="utf-8") as _f:
+            _SCORECARD_CACHE = json.load(_f)
+except Exception:
+    pass
 
 def _get_engine() -> IdentityEngine:
     global _ENGINE_INSTANCE
     if _ENGINE_INSTANCE is None:
         _ENGINE_INSTANCE = IdentityEngine(SQLITE_DB)
     return _ENGINE_INSTANCE
+
+def _get_sqlite_connection(db_path: str):
+    import sqlite3
+    con = sqlite3.connect(db_path, timeout=30.0)
+    try:
+        cur = con.cursor()
+        cur.execute("PRAGMA journal_mode = WAL;")
+        cur.execute("PRAGMA synchronous = NORMAL;")
+        cur.execute("PRAGMA cache_size = -131072;")
+        cur.execute("PRAGMA temp_store = MEMORY;")
+        cur.execute("PRAGMA busy_timeout = 30000;")
+        cur.close()
+    except Exception as e:
+        print(f"    [WARN] Failed to configure SQLite PRAGMAs: {e}")
+    return con
 
 
 def _load_bowler_db() -> None:
@@ -321,22 +345,13 @@ def _get_scorecard_aliases(col: str, canonical_name: str, engine: IdentityEngine
     """
     cache_key = f"{col}:{canonical_name}"
     
-    # 1. Memory Cache
-    if cache_key in _PLAYER_ALIAS_CACHE:
-        return _PLAYER_ALIAS_CACHE[cache_key]
-
-    # 2. Persistent Disk Cache
-    global _SCORECARD_CACHE
-    if not _SCORECARD_CACHE and _SCORECARD_CACHE_FILE.exists():
-        try:
-            with open(_SCORECARD_CACHE_FILE, "r") as f:
-                _SCORECARD_CACHE = json.load(f)
-        except Exception:
-            pass
-            
-    if cache_key in _SCORECARD_CACHE:
-        _PLAYER_ALIAS_CACHE[cache_key] = _SCORECARD_CACHE[cache_key]
-        return _SCORECARD_CACHE[cache_key]
+    # 1. Memory and Disk Cache (Thread-safe read)
+    with _SCORECARD_LOCK:
+        if cache_key in _PLAYER_ALIAS_CACHE:
+            return _PLAYER_ALIAS_CACHE[cache_key]
+        if cache_key in _SCORECARD_CACHE:
+            _PLAYER_ALIAS_CACHE[cache_key] = _SCORECARD_CACHE[cache_key]
+            return _SCORECARD_CACHE[cache_key]
 
     import duckdb as _duckdb
     last_name = canonical_name.split()[-1]
@@ -354,9 +369,8 @@ def _get_scorecard_aliases(col: str, canonical_name: str, engine: IdentityEngine
             print(f"    [WARN] DuckDB alias scan failed: {exc}")
             candidates = []
     elif os.path.exists(db_path):
-        import sqlite3 as _sqlite3
         try:
-            con = _sqlite3.connect(db_path)
+            con = _get_sqlite_connection(db_path)
             cur = con.cursor()
             cur.execute(
                 f"SELECT DISTINCT {col} FROM deliveries WHERE {col} LIKE ?",
@@ -410,16 +424,17 @@ def _get_scorecard_aliases(col: str, canonical_name: str, engine: IdentityEngine
         aliases.append(canonical_name)
 
     res_list = list(set(aliases))
-    _PLAYER_ALIAS_CACHE[cache_key] = res_list
     
-    # Update persistent cache
-    _SCORECARD_CACHE[cache_key] = res_list
-    try:
-        _SCORECARD_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(_SCORECARD_CACHE_FILE, "w") as f:
-            json.dump(_SCORECARD_CACHE, f, indent=2)
-    except Exception:
-        pass
+    # Thread-safe write to cache
+    with _SCORECARD_LOCK:
+        _PLAYER_ALIAS_CACHE[cache_key] = res_list
+        _SCORECARD_CACHE[cache_key] = res_list
+        try:
+            _SCORECARD_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(_SCORECARD_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(_SCORECARD_CACHE, f, indent=2)
+        except Exception:
+            pass
 
     return res_list
 
@@ -1130,8 +1145,7 @@ def _load_subject_dataframe(subject_col: str, canonical_subject: str, engine: Id
             df_sub = con.execute(query, params).fetch_df()
             con.close()
         else:
-            import sqlite3
-            con = sqlite3.connect(db_path, timeout=30.0)
+            con = _get_sqlite_connection(db_path)
             print(f"    [OK] Powered by SQLite: {len(where_clauses)-1} filters pushed.")
             df_sub = pd.read_sql(query, con, params=tuple(params))
             con.close()
