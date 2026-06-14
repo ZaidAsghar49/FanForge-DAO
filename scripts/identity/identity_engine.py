@@ -173,10 +173,8 @@ class IdentityEngine:
             try:
                 conn = sqlite3.connect(str(db_path))
                 cursor = conn.cursor()
-                cursor.execute("SELECT DISTINCT batter FROM deliveries")
+                cursor.execute("SELECT DISTINCT player_name FROM players")
                 active_names = {row[0].strip().lower() for row in cursor.fetchall() if row[0]}
-                cursor.execute("SELECT DISTINCT bowler FROM deliveries")
-                active_names.update(row[0].strip().lower() for row in cursor.fetchall() if row[0])
                 conn.close()
 
                 # Map active scorecard names to registry player IDs
