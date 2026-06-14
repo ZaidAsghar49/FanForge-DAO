@@ -1133,22 +1133,24 @@ def _load_subject_dataframe(subject_col: str, canonical_subject: str, engine: Id
     query = f"SELECT {cols_str} FROM deliveries WHERE {' AND '.join(where_clauses)}"
 
     try:
-        if use_duckdb:
-            import duckdb
-            con = duckdb.connect(DUCKDB_PATH, read_only=True)
-            try:
-                con.execute("SET memory_limit='256MB'")
-                con.execute("SET threads=1")
-            except Exception:
-                pass
-            print(f"    [OK] Powered by DuckDB: {len(where_clauses)-1} filters pushed.")
-            df_sub = con.execute(query, params).fetch_df()
-            con.close()
-        else:
-            con = _get_sqlite_connection(db_path)
-            print(f"    [OK] Powered by SQLite: {len(where_clauses)-1} filters pushed.")
-            df_sub = pd.read_sql(query, con, params=tuple(params))
-            con.close()
+        import duckdb
+        con = duckdb.connect()
+        try:
+            con.execute("SET memory_limit='4GB'")
+            con.execute("SET threads=2")
+        except Exception:
+            pass
+        
+        # Install and load sqlite scanner
+        con.execute("INSTALL sqlite; LOAD sqlite;")
+        
+        from pathlib import Path
+        safe_db_path = Path(db_path).as_posix()
+        query_duck = f"SELECT {cols_str} FROM sqlite_scan('{safe_db_path}', 'deliveries') WHERE {' AND '.join(where_clauses)}"
+        
+        print(f"    [OK] Powered by DuckDB sqlite_scan: {len(where_clauses)-1} filters pushed.")
+        df_sub = con.execute(query_duck, params).fetch_df()
+        con.close()
         
         # ensure datatypes match old csv loader
         for col in ["is_wicket", "is_bowler_wicket", "runs_batter", "runs_total"]:
