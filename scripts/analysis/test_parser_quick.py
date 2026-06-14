@@ -1,9 +1,8 @@
 """Quick standalone test for ai_parser._mock_parse (no API key needed)."""
 import json, os, sys
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parents[2]))
+os.environ["FORCE_MOCK_PARSER"] = "1"          # force fallback parser
 from scripts.analysis.ai_parser import parse_claim
-import os
-os.environ.pop("GROQ_API_KEY", None)          # force fallback parser
 
 TESTS = [
     ("Babar Azam averages 50 in the 1st innings at MCG against Left-arm Pace",

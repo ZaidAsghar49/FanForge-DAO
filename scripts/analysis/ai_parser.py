@@ -29,18 +29,64 @@ from groq import Groq, RateLimitError
 
 load_dotenv()
 
-# Circuit breaker for Groq API rate limits
-_api_rate_limited_until = 0.0
+# Circuit breaker and rotation for Groq API rate limits
+_key_rate_limited_until = {}
+_active_key_index = 0
 _RATE_LIMIT_COOLDOWN_SECONDS = 900  # 15 minutes
 
+def get_groq_api_keys() -> list[str]:
+    # Check if mock parser is explicitly forced for testing/offline runs
+    if os.environ.get("FORCE_MOCK_PARSER") == "1":
+        return []
+
+    keys = []
+    # 1. Primary key(s) from GROQ_API_KEY env (could be comma-separated list)
+    primary = os.environ.get("GROQ_API_KEY", "")
+    if primary:
+        for k in primary.split(","):
+            k_clean = k.strip()
+            if k_clean and k_clean not in keys:
+                keys.append(k_clean)
+
+    # 2. Secondary key(s) from GROQ_API_KEY_SECONDARY env
+    secondary = os.environ.get("GROQ_API_KEY_SECONDARY", "")
+    if secondary:
+        for k in secondary.split(","):
+            k_clean = k.strip()
+            if k_clean and k_clean not in keys:
+                keys.append(k_clean)
+
+    return keys
+
 def is_circuit_breaker_active() -> bool:
-    global _api_rate_limited_until
-    if _api_rate_limited_until > 0:
-        if time.time() < _api_rate_limited_until:
-            return True
-        else:
-            _api_rate_limited_until = 0.0
-    return False
+    keys = get_groq_api_keys()
+    if not keys:
+        return True  # No keys available
+    now = time.time()
+    for k in keys:
+        if now >= _key_rate_limited_until.get(k, 0.0):
+            return False  # Found at least one working key
+    return True  # All keys are rate-limited
+
+def get_current_client() -> tuple[Groq | None, str | None]:
+    keys = get_groq_api_keys()
+    if not keys:
+        return None, None
+    global _active_key_index
+    _active_key_index = _active_key_index % len(keys)
+    active_key = keys[_active_key_index]
+    return Groq(api_key=active_key, max_retries=0), active_key
+
+def rotate_api_key(failed_key: str):
+    global _active_key_index
+    keys = get_groq_api_keys()
+    if not keys:
+        return
+    try:
+        idx = keys.index(failed_key)
+        _active_key_index = (idx + 1) % len(keys)
+    except ValueError:
+        _active_key_index = (_active_key_index + 1) % len(keys)
 
 # ---------------------------------------------------------------------------
 # LLM-based parser
@@ -821,7 +867,7 @@ def parse_paragraph(paragraph: str) -> list[dict]:
     _log = logging.getLogger("ai_parser")
 
     if is_circuit_breaker_active():
-        _log.warning("Groq API circuit breaker active. Using mock fallback immediately.")
+        _log.warning("Groq API circuit breaker active (all keys rate-limited). Using mock fallback immediately.")
         results = _mock_parse_paragraph(paragraph)
         for r in results:
             r["_paragraph_decomposed"] = True
@@ -829,31 +875,38 @@ def parse_paragraph(paragraph: str) -> list[dict]:
             r["_parse_error"] = "Groq API rate limit circuit breaker active"
         return results
 
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        _log.debug("parse_paragraph: no GROQ_API_KEY — using mock fallback.")
+    keys = get_groq_api_keys()
+    if not keys:
+        _log.debug("parse_paragraph: no Groq API keys configured — using mock fallback.")
         results = _mock_parse_paragraph(paragraph)
         for r in results:
             r["_paragraph_decomposed"] = True
             r["_parse_degraded"] = True
-            r["_parse_error"] = "No GROQ_API_KEY set"
+            r["_parse_error"] = "No Groq API keys configured"
         return results
 
     try:
-        client = Groq(api_key=api_key, max_retries=0)
         last_error: Exception | None = None
 
         for attempt in range(1, 4):
+            client, active_key = get_current_client()
+            if not client:
+                raise ValueError("No GROQ API client available")
             try:
                 raw_text = _llm_call(client, paragraph, _MULTI_CLAIM_SYSTEM_PROMPT)
             except RateLimitError as rl_exc:
-                global _api_rate_limited_until
-                _api_rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
+                global _key_rate_limited_until
+                _key_rate_limited_until[active_key] = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
                 _log.error(
-                    f"Groq API RateLimitError: {rl_exc}. "
-                    f"Circuit breaker activated for {_RATE_LIMIT_COOLDOWN_SECONDS}s."
+                    f"Groq API key rate-limited: {active_key[:15]}... "
+                    f"Circuit breaker armed for this key for {_RATE_LIMIT_COOLDOWN_SECONDS}s."
                 )
-                raise rl_exc
+                rotate_api_key(active_key)
+                if is_circuit_breaker_active():
+                    _log.error("All Groq API keys are rate-limited. Falling back.")
+                    raise rl_exc
+                _log.info("Retrying with rotated Groq API key...")
+                continue
             except Exception as call_exc:
                 last_error = call_exc
                 _log.warning(f"parse_paragraph attempt {attempt} LLM call failed: {call_exc}")
@@ -922,27 +975,37 @@ def _parse_claim_internal(claim_string: str) -> dict:
         result["_parse_error"] = "Groq API rate limit circuit breaker active"
         return result
 
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        return _mock_parse(claim_string)
+    keys = get_groq_api_keys()
+    if not keys:
+        result = _mock_parse(claim_string)
+        result["_parse_degraded"] = True
+        result["_parse_error"] = "No Groq API keys configured"
+        return result
 
     try:
-        client = Groq(api_key=api_key, max_retries=0)
         last_error = None
 
         # Multi-pass parse with critic verification (double-entry bookkeeping)
         # Optimization: Use fast-path for the first attempt.
         for attempt in range(1, 4):
+            client, active_key = get_current_client()
+            if not client:
+                raise ValueError("No GROQ API client available")
             try:
                 text = _llm_call(client, claim_string, _SYSTEM_PROMPT)
             except RateLimitError as rl_exc:
-                global _api_rate_limited_until
-                _api_rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
+                global _key_rate_limited_until
+                _key_rate_limited_until[active_key] = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
                 _log.error(
-                    f"Groq API RateLimitError: {rl_exc}. "
-                    f"Circuit breaker activated for {_RATE_LIMIT_COOLDOWN_SECONDS}s."
+                    f"Groq API key rate-limited: {active_key[:15]}... "
+                    f"Circuit breaker armed for this key for {_RATE_LIMIT_COOLDOWN_SECONDS}s."
                 )
-                raise rl_exc
+                rotate_api_key(active_key)
+                if is_circuit_breaker_active():
+                    _log.error("All Groq API keys are rate-limited. Falling back.")
+                    raise rl_exc
+                _log.info("Retrying with rotated Groq API key...")
+                continue
             except Exception as call_exc:
                 last_error = call_exc
                 continue
@@ -978,12 +1041,17 @@ def _parse_claim_internal(claim_string: str) -> dict:
                         temperature=0,
                     )
                 except RateLimitError as rl_exc:
-                    _api_rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
+                    _key_rate_limited_until[active_key] = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
                     _log.error(
-                        f"Groq API RateLimitError: {rl_exc}. "
-                        f"Circuit breaker activated for {_RATE_LIMIT_COOLDOWN_SECONDS}s."
+                        f"Groq API key rate-limited: {active_key[:15]}... "
+                        f"Circuit breaker armed for this key for {_RATE_LIMIT_COOLDOWN_SECONDS}s."
                     )
-                    raise rl_exc
+                    rotate_api_key(active_key)
+                    if is_circuit_breaker_active():
+                        _log.error("All Groq API keys are rate-limited. Falling back.")
+                        raise rl_exc
+                    _log.info("Retrying with rotated Groq API key...")
+                    continue
                 critic_text = critic_response.choices[0].message.content
                 critic = _parse_json_only(critic_text)
                 if isinstance(critic, dict) and critic.get("verdict") == "ok":
