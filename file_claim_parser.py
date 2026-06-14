@@ -369,6 +369,69 @@ def _dispatch_verdict(claim: str, skip_predictions: bool = True) -> dict:
 # Main Public API
 # =============================================================================
 
+def _process_single_claim(claim: str, skip_predictions: bool = True) -> list[dict]:
+    """Helper to process a single claim for parallel threading."""
+    t0 = time.perf_counter()
+    preflight = preflight_identity_check(claim)
+    raw = _dispatch_verdict(claim, skip_predictions=skip_predictions)
+    elapsed = round((time.perf_counter() - t0) * 1000, 1)
+
+    results = []
+    # Check if it's a multi-claim result from validate_claim refactor
+    if raw.get("is_multi_claim") and "verdicts" in raw:
+        sub_verdicts = raw["verdicts"]
+        for sub_idx, sub_raw in enumerate(sub_verdicts, 1):
+            sub_subject = sub_raw.get("subject")
+            sub_preflight = preflight
+            if sub_subject and sub_subject != preflight.get("resolved_name"):
+                sub_preflight = preflight_identity_check(sub_subject)
+
+            verdict_entry = {
+                "claim": sub_raw.get("claim") or f"Sub-claim #{sub_idx} of: {claim}",
+                "status": sub_raw.get("status", "error"),
+                "verdict": sub_raw.get("verdict"),
+                "claimed_value": sub_raw.get("claimed_value"),
+                "real_val": sub_raw.get("real_val"),
+                "accuracy_pct": sub_raw.get("accuracy_pct"),
+                "subject": sub_subject or sub_preflight.get("resolved_name"),
+                "metric": sub_raw.get("metric"),
+                "sample_size": sub_raw.get("sample_size", 0),
+                "confidence": sub_raw.get("confidence", 0.0),
+                "filters": sub_raw.get("filters", {}),
+                "message": sub_raw.get("message"),
+                "preflight": sub_preflight,
+                "elapsed_ms": elapsed,
+            }
+            for extra_key in ("insight", "insight_tags", "execution_mode", "real_meta"):
+                if extra_key in sub_raw:
+                    verdict_entry[extra_key] = sub_raw[extra_key]
+            results.append(verdict_entry)
+    else:
+        # Normalize single-claim output
+        verdict_entry: dict = {
+            "claim": claim,
+            "status": raw.get("status", "error"),
+            "verdict": raw.get("verdict"),
+            "claimed_value": raw.get("claimed_value"),
+            "real_val": raw.get("real_val"),
+            "accuracy_pct": raw.get("accuracy_pct"),
+            "subject": raw.get("subject") or preflight.get("resolved_name"),
+            "metric": raw.get("metric"),
+            "sample_size": raw.get("sample_size", 0),
+            "confidence": raw.get("confidence", 0.0),
+            "filters": raw.get("filters", {}),
+            "message": raw.get("message"),
+            "preflight": preflight,
+            "elapsed_ms": elapsed,
+        }
+        for extra_key in ("insight", "insight_tags", "execution_mode", "real_meta"):
+            if extra_key in raw:
+                verdict_entry[extra_key] = raw[extra_key]
+        results.append(verdict_entry)
+
+    return results
+
+
 def parse_document_claims(
     file_bytes: bytes,
     filename: str,
@@ -385,20 +448,7 @@ def parse_document_claims(
         max_claims:       Cap on number of claims to verify per document.
 
     Returns:
-        A list of verdict dicts, one per isolated claim. Each dict contains:
-          - claim         : str  — the original isolated sentence
-          - status        : str  — "ok" / "error" / "no_data" / "needs_disambiguation"
-          - verdict       : str  — "TRUE" / "FALSE" / "APPROXIMATE" / "Informational"
-          - claimed_value : float | None
-          - real_val      : float | None
-          - accuracy_pct  : float | None
-          - subject       : str  — resolved canonical player name
-          - metric        : str
-          - sample_size   : int
-          - confidence    : float
-          - filters       : dict
-          - preflight     : dict — identity preflight result
-          - elapsed_ms    : float
+        A list of verdict dicts, one per isolated claim.
     """
     log.info(f"Starting IDP pipeline for '{filename}' ({len(file_bytes):,} bytes)…")
     t_start = time.perf_counter()
@@ -420,78 +470,37 @@ def parse_document_claims(
             "claim": None,
         }]
 
-    # Stage 3 & 4: Identity preflight + Verdict dispatch
+    # Pre-warm IdentityEngine cache to avoid thread race conditions
+    try:
+        _get_identity_engine()
+    except Exception as ie_err:
+        log.warning(f"Could not pre-warm IdentityEngine cache: {ie_err}")
+
+    # Stage 3 & 4: Identity preflight + Verdict dispatch in parallel
+    from concurrent.futures import ThreadPoolExecutor
+
     verdicts: list[dict] = []
-    for i, claim in enumerate(claims, 1):
-        log.info(f"[{i}/{len(claims)}] Processing: {claim[:70]}…")
-        t0 = time.perf_counter()
+    # Dynamic workers count based on claims (cap at 8 to avoid overwhelming API limits)
+    max_workers = min(len(claims), 8)
+    log.info(f"Dispatching {len(claims)} claims to ThreadPoolExecutor with {max_workers} workers…")
 
-        # Stage 3: Identity preflight
-        preflight = preflight_identity_check(claim)
-
-        # Stage 4: Dispatch to validate_claim
-        raw = _dispatch_verdict(claim, skip_predictions=skip_predictions)
-
-        elapsed = round((time.perf_counter() - t0) * 1000, 1)
-
-        # Check if it's a multi-claim result from validate_claim refactor
-        if raw.get("is_multi_claim") and "verdicts" in raw:
-            sub_verdicts = raw["verdicts"]
-            log.info(f"  → unpacked {len(sub_verdicts)} sub-claims from multi-claim sentence")
-            for sub_idx, sub_raw in enumerate(sub_verdicts, 1):
-                sub_subject = sub_raw.get("subject")
-                sub_preflight = preflight
-                if sub_subject and sub_subject != preflight.get("resolved_name"):
-                    sub_preflight = preflight_identity_check(sub_subject)
-
-                verdict_entry = {
-                    "claim": sub_raw.get("claim") or f"Sub-claim #{sub_idx} of: {claim}",
-                    "status": sub_raw.get("status", "error"),
-                    "verdict": sub_raw.get("verdict"),
-                    "claimed_value": sub_raw.get("claimed_value"),
-                    "real_val": sub_raw.get("real_val"),
-                    "accuracy_pct": sub_raw.get("accuracy_pct"),
-                    "subject": sub_subject or sub_preflight.get("resolved_name"),
-                    "metric": sub_raw.get("metric"),
-                    "sample_size": sub_raw.get("sample_size", 0),
-                    "confidence": sub_raw.get("confidence", 0.0),
-                    "filters": sub_raw.get("filters", {}),
-                    "message": sub_raw.get("message"),
-                    "preflight": sub_preflight,
-                    "elapsed_ms": elapsed,
-                }
-                for extra_key in ("insight", "insight_tags", "execution_mode", "real_meta"):
-                    if extra_key in sub_raw:
-                        verdict_entry[extra_key] = sub_raw[extra_key]
-                verdicts.append(verdict_entry)
-        else:
-            # Normalize single-claim output
-            verdict_entry: dict = {
-                "claim": claim,
-                "status": raw.get("status", "error"),
-                "verdict": raw.get("verdict"),
-                "claimed_value": raw.get("claimed_value"),
-                "real_val": raw.get("real_val"),
-                "accuracy_pct": raw.get("accuracy_pct"),
-                "subject": raw.get("subject") or preflight.get("resolved_name"),
-                "metric": raw.get("metric"),
-                "sample_size": raw.get("sample_size", 0),
-                "confidence": raw.get("confidence", 0.0),
-                "filters": raw.get("filters", {}),
-                "message": raw.get("message"),
-                "preflight": preflight,
-                "elapsed_ms": elapsed,
-            }
-            for extra_key in ("insight", "insight_tags", "execution_mode", "real_meta"):
-                if extra_key in raw:
-                    verdict_entry[extra_key] = raw[extra_key]
-            verdicts.append(verdict_entry)
-
-            log.info(
-                f"  → status={verdict_entry['status']}, "
-                f"verdict={verdict_entry['verdict']}, "
-                f"elapsed={elapsed}ms"
-            )
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_process_single_claim, claim, skip_predictions)
+            for claim in claims
+        ]
+        for idx, fut in enumerate(futures, 1):
+            try:
+                claim_results = fut.result()
+                verdicts.extend(claim_results)
+                log.info(f"[{idx}/{len(claims)}] Processed successfully.")
+            except Exception as thread_exc:
+                log.error(f"[{idx}/{len(claims)}] Thread execution failed: {thread_exc}")
+                verdicts.append({
+                    "claim": claims[idx - 1] if idx - 1 < len(claims) else "Unknown",
+                    "status": "error",
+                    "message": f"Parallel thread execution error: {thread_exc}",
+                })
 
     total_elapsed = round((time.perf_counter() - t_start) * 1000, 1)
     log.info(
