@@ -283,29 +283,16 @@ def _sentence_density_score(sentence: str) -> float:
 
 def _split_into_sentences(text: str) -> list[str]:
     """
-    Sentence and line-based splitter. Splits by newlines first to isolate
-    independent queries (protecting middle-of-sentence wraps), then runs a
-    naïve sentence splitter on each line.
+    Sentence and line-based splitter.
+    Splits by newlines first to isolate independent queries/lines,
+    then runs a naïve sentence splitter on each line.
     """
-    query_verbs = r"(?:Verify|Check|Compare|Calculate|Validate|Confirm|Determine|Analy[sz]e|Report)"
-
-    # Replace newlines followed by a query verb with a placeholder
-    text_processed = re.sub(rf"\s*[\r\n]+\s*(?={query_verbs}\b)", "__QUERY_SEP__", text)
-    # Replace other newlines (mid-sentence line wraps) with a space
-    text_processed = re.sub(r"\s*[\r\n]+\s*", " ", text_processed)
-    # Restore placeholder to clean newlines
-    text_processed = text_processed.replace("__QUERY_SEP__", "\n")
-
-    lines = text_processed.split("\n")
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
     cleaned_sentences: list[str] = []
 
     for line in lines:
-        line_stripped = line.strip()
-        if not line_stripped:
-            continue
-
         # Protect decimal numbers (e.g. "54.72" → no split)
-        line_processed = re.sub(r"(\d)\.(\d)", r"\1DECIMAL\2", line_stripped)
+        line_processed = re.sub(r"(\d)\.(\d)", r"\1DECIMAL\2", line)
         # Protect common abbreviations
         line_processed = re.sub(
             r"\b(vs|Sr|Mr|Mrs|Dr|avg|approx|Est|min|max)\.",
@@ -373,14 +360,14 @@ def density_chunk_paragraphs(paragraphs: Iterator[str]) -> list[str]:
             continue
         s_len = len(s) + 1  # +1 for space separator
         if current_len + s_len > _CHUNK_MAX_CHARS and current_chunk:
-            chunks.append(" ".join(current_chunk))
+            chunks.append("\n".join(current_chunk))
             current_chunk = []
             current_len = 0
         current_chunk.append(s)
         current_len += s_len
 
     if current_chunk:
-        chunks.append(" ".join(current_chunk))
+        chunks.append("\n".join(current_chunk))
 
     discarded = sum(1 for k in kept if not k)
     log.info(
