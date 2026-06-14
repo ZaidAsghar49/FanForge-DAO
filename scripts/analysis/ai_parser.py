@@ -20,13 +20,27 @@ Supported filter keys (38 total):
 import json
 import os
 import re
+import time
 from enum import Enum
 from typing import Any, Literal
 
 from dotenv import load_dotenv
-from groq import Groq
+from groq import Groq, RateLimitError
 
 load_dotenv()
+
+# Circuit breaker for Groq API rate limits
+_api_rate_limited_until = 0.0
+_RATE_LIMIT_COOLDOWN_SECONDS = 900  # 15 minutes
+
+def is_circuit_breaker_active() -> bool:
+    global _api_rate_limited_until
+    if _api_rate_limited_until > 0:
+        if time.time() < _api_rate_limited_until:
+            return True
+        else:
+            _api_rate_limited_until = 0.0
+    return False
 
 # ---------------------------------------------------------------------------
 # LLM-based parser
@@ -806,6 +820,15 @@ def parse_paragraph(paragraph: str) -> list[dict]:
     import logging
     _log = logging.getLogger("ai_parser")
 
+    if is_circuit_breaker_active():
+        _log.warning("Groq API circuit breaker active. Using mock fallback immediately.")
+        results = _mock_parse_paragraph(paragraph)
+        for r in results:
+            r["_paragraph_decomposed"] = True
+            r["_parse_degraded"] = True
+            r["_parse_error"] = "Groq API rate limit circuit breaker active"
+        return results
+
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         _log.debug("parse_paragraph: no GROQ_API_KEY — using mock fallback.")
@@ -817,12 +840,20 @@ def parse_paragraph(paragraph: str) -> list[dict]:
         return results
 
     try:
-        client = Groq(api_key=api_key)
+        client = Groq(api_key=api_key, max_retries=0)
         last_error: Exception | None = None
 
         for attempt in range(1, 4):
             try:
                 raw_text = _llm_call(client, paragraph, _MULTI_CLAIM_SYSTEM_PROMPT)
+            except RateLimitError as rl_exc:
+                global _api_rate_limited_until
+                _api_rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
+                _log.error(
+                    f"Groq API RateLimitError: {rl_exc}. "
+                    f"Circuit breaker activated for {_RATE_LIMIT_COOLDOWN_SECONDS}s."
+                )
+                raise rl_exc
             except Exception as call_exc:
                 last_error = call_exc
                 _log.warning(f"parse_paragraph attempt {attempt} LLM call failed: {call_exc}")
@@ -882,18 +913,40 @@ def _parse_claim_internal(claim_string: str) -> dict:
     Parse a NL cricket claim into a structured filter dict.
     Falls back to rule-based _mock_parse if LLM fails or is invalid.
     """
+    import logging
+    _log = logging.getLogger("ai_parser")
+
+    if is_circuit_breaker_active():
+        result = _mock_parse(claim_string)
+        result["_parse_degraded"] = True
+        result["_parse_error"] = "Groq API rate limit circuit breaker active"
+        return result
+
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         return _mock_parse(claim_string)
 
     try:
-        client = Groq(api_key=api_key)
+        client = Groq(api_key=api_key, max_retries=0)
         last_error = None
 
         # Multi-pass parse with critic verification (double-entry bookkeeping)
         # Optimization: Use fast-path for the first attempt.
         for attempt in range(1, 4):
-            text = _llm_call(client, claim_string, _SYSTEM_PROMPT)
+            try:
+                text = _llm_call(client, claim_string, _SYSTEM_PROMPT)
+            except RateLimitError as rl_exc:
+                global _api_rate_limited_until
+                _api_rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
+                _log.error(
+                    f"Groq API RateLimitError: {rl_exc}. "
+                    f"Circuit breaker activated for {_RATE_LIMIT_COOLDOWN_SECONDS}s."
+                )
+                raise rl_exc
+            except Exception as call_exc:
+                last_error = call_exc
+                continue
+
             try:
                 candidate = _validate_and_sanitize(text)
             except Exception as ve:
@@ -915,14 +968,23 @@ def _parse_claim_internal(claim_string: str) -> dict:
 
             try:
                 critic_in = json.dumps({"claim": claim_string, "candidate": candidate}, ensure_ascii=False)
-                critic_text = client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": _CRITIC_SYSTEM_PROMPT},
-                        {"role": "user", "content": critic_in},
-                    ],
-                    model="llama-3.3-70b-versatile",
-                    temperature=0,
-                ).choices[0].message.content
+                try:
+                    critic_response = client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": _CRITIC_SYSTEM_PROMPT},
+                            {"role": "user", "content": critic_in},
+                        ],
+                        model="llama-3.3-70b-versatile",
+                        temperature=0,
+                    )
+                except RateLimitError as rl_exc:
+                    _api_rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
+                    _log.error(
+                        f"Groq API RateLimitError: {rl_exc}. "
+                        f"Circuit breaker activated for {_RATE_LIMIT_COOLDOWN_SECONDS}s."
+                    )
+                    raise rl_exc
+                critic_text = critic_response.choices[0].message.content
                 critic = _parse_json_only(critic_text)
                 if isinstance(critic, dict) and critic.get("verdict") == "ok":
                     ok, issue = _subject_type_guard(claim_string, candidate)
@@ -935,6 +997,8 @@ def _parse_claim_internal(claim_string: str) -> dict:
                     return candidate
                 # else retry with critic issues implicitly captured by next attempt
                 candidate["_parse_verified"] = False
+            except RateLimitError:
+                raise
             except Exception:
                 # If critic fails, still return validated candidate (better than falling back)
                 candidate["_parse_attempts"] = attempt
