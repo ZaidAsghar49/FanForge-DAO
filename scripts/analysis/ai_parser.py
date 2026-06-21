@@ -1585,7 +1585,7 @@ def _mock_parse(claim_string: str) -> dict:
     # -- Subject (player name) -- last resort heuristic ---------------------
     import json, os
     _known_players = [
-        "Babar Azam", "Virat Kohli", "Joe Root", "Steve Smith", "Kane Williamson",
+        "Babar Azam", "Virat Kohli", "Joe Root", "Steve Smith", "Steven Smith", "Kane Williamson",
         "Rohit Sharma", "David Warner", "Shakib Al Hasan", "Ben Stokes",
         "Pat Cummins", "Jasprit Bumrah", "Mitchell Starc",
         "Travis Head", "Chris Gayle", "MS Dhoni", "Rishabh Pant",
