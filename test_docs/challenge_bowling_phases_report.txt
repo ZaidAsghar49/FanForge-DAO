@@ -1,0 +1,18 @@
+FanForge Bowling Phase Audit Report
+Document ID: AUD-2026-BOWLING-PHASES-REPORT
+Classification: Internal Analytics
+All records in this document are audited against ball-by-ball deliveries for Test and ODI matches since 2019.
+
+Section 1: ODI Bowling Phase Performance
+Auditing wicket-taking efficiency and run restriction in ODI matches.
+First, verify if Jasprit Bumrah's bowling average in ODI matches during the Death overs is 23.5.
+Next, check if Shaheen Afridi's economy rate in ODI matches during the Powerplay is 5.1.
+We also need to validate if Adil Rashid's bowling average in ODI matches during the Middle overs is 31.8.
+
+Section 2: Test Match bowling phase analysis
+Analyzing bowling workloads and wicket distributions in Test matches.
+Check if Mitchell Starc's bowling strike rate in Test matches during the Powerplay is 32.4.
+Furthermore, verify if Pat Cummins's wickets count in Test matches during the Middle overs is above 45.
+Additionally, confirm if Ravichandran Ashwin's dots forced in Test matches during the Middle overs is above 1000.
+
+This concludes the bowling phase analytics audit. For inquiries, contact analytics@fanforge-dao.org.
