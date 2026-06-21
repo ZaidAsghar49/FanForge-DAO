@@ -1,3 +1,11 @@
+---
+title: Cricket Truth O Meter
+emoji: 🏏
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+---
 # CricketTruth AI
 
 > A fact-checking engine that verifies natural language claims about cricket statistics using ball-by-ball data from 20,000+ Cricsheet JSON files.
