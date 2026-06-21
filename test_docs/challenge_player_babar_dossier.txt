@@ -1,23 +1,22 @@
-FanForge Technical Report: Babar Azam Performance Audit
+FanForge Technical Report: Babar Azam Performance Audit (Test & ODI)
 Date: June 2026
 Prepared by: FanForge-DAO Analytics Dept
 
 Executive Summary:
-Babar Azam has established himself as the anchor of the Pakistani batting lineup across all three formats. This report analyzes his statistical output, focusing on format-specific averages, strike rates under different conditions, and performance against bowler types to understand his technical baseline.
+Babar Azam has established himself as the anchor of the Pakistani batting lineup in the longer formats of the game. This report analyzes his statistical output across Test and One-Day International (ODI) matches, focusing on format-specific averages, strike rates under different conditions, and performance against bowler types to understand his technical baseline.
 
 Section 1: Test Match Endurance
-In the longest format of the game, Azam's ability to occupy the crease is vital. Over his career, Babar Azam's batting average in Test matches is 46.0. This solid number reflects his sound defensive technique and patience, making him one of the most reliable top-order batters in red-ball cricket.
+In the longest format of the game, Azam's ability to occupy the crease is vital. Over his career, Babar Azam's batting average in Test matches is 46.0. This solid number reflects his sound defensive technique.
+Furthermore, his scoring pace in red-ball cricket remains steady. Babar Azam's strike rate in Test matches is 56.0. This reflects a controlled approach, prioritizing wicket preservation.
+However, when playing away from home, he faces tougher batting conditions. For example, Babar Azam's batting average in Test matches in Away conditions is 39.1. This reveals a clear drop compared to his home matches, suggesting room for improvement in overseas tours.
 
-Section 2: One-Day International Dominance and Milestones
+Section 2: One-Day International Dominance and matchups
 Azam has enjoyed his most consistent success in the 50-over format. 
 First, Babar Azam's high score in ODI matches is 158. This spectacular innings demonstrated his capability to pace an innings and convert starts into massive, match-winning scores.
+Additionally, his overall scoring pace in this format is strong. Babar Azam's strike rate in ODI matches is 89.2. This high scoring rate shows how effectively he keeps the scoreboard moving.
 Furthermore, his ability to negotiate different bowling types is exceptional. Babar Azam's batting average against Spin bowling in ODI matches is 60.2. This high average shows how effectively he uses his feet and sweeps to neutralize spinners.
+When facing faster bowlers, he remains highly effective. Babar Azam's batting average against Pace bowling in ODI matches is 55.6. This reflects a balanced scoring profile against both speed and spin.
 However, when playing in subcontinental conditions outside Pakistan, he faces unique challenges. For example, Babar Azam's strike rate in ODI matches in India is 83.0. While this is slightly lower than his career average, it shows a more measured, anchor-based role in Indian conditions.
 
-Section 3: T20 Matchplay Dynamics
-In the shortest format, scoring rate and matchup efficiency are key.
-When facing pacers, he plays with exceptional risk management. Babar Azam's batting average against Pace bowling in T20 matches is 41.8. This high average against pace confirms that his classical technique works effectively even in high-tempo situations.
-In terms of scoring velocity, Babar Azam's strike rate in T20 matches in the Powerplay is 121.6. This reflects a calculated approach in the opening six overs, where he focuses on finding gaps rather than high-risk aerial hitting.
-
 Conclusion:
-Azam remains a world-class accumulator who excels in ODI cricket, showing exceptional control against spin (60.2 average) and pace in T20 matches (41.8 average).
+Azam remains a world-class accumulator who excels in ODI cricket, showing exceptional control against spin (60.2 average) and pace (55.6 average). In Test cricket, his career average of 46.0 is solid, though overseas conditions present challenges.
