@@ -1,7 +1,15 @@
 import pandas as pd
-from scripts.analysis.prediction.feature_builder import build_innings_features, encode_categorical_features
+import numpy as np
+from scripts.analysis.prediction.feature_builder import build_innings_features, encode_categorical_features, build_sequence_dataset
 from scripts.analysis.prediction.train_models import train_batting_models, train_bowling_models
 from scripts.analysis.prediction.predict_next_performance import predict_next_batting, predict_next_bowling
+
+try:
+    from scripts.analysis.prediction.lstm_forecaster import train_lstm_model, predict_next_sequence
+    LSTM_AVAILABLE = True
+except Exception as _lstm_import_err:
+    LSTM_AVAILABLE = False
+    print(f"[LSTM] Not available: {_lstm_import_err}. Falling back to sklearn ensemble only.")
 
 def run_prediction_pipeline(df_subject_full: pd.DataFrame, subject: str, is_batting: bool, filters: dict):
     """
@@ -46,6 +54,41 @@ def run_prediction_pipeline(df_subject_full: pd.DataFrame, subject: str, is_batt
             return {"error": "Training failed."}
         preds = predict_next_batting(models, df_encoded, target_context)
         
+        # ---- LSTM Integration ----
+        try:
+            if LSTM_AVAILABLE:
+                seq_length = 5
+                available_cols = df_encoded.columns.tolist()
+                feature_cols = [c for c in ["runs", "strike_rate", "balls_faced", "is_out", "neutral_venue", "is_chasing", "opp_freq"] if c in available_cols]
+                target_cols = ["runs", "target_50", "target_100"]
+                
+                X_seq, y_seq = build_sequence_dataset(df_encoded, seq_length=seq_length, feature_cols=feature_cols, target_cols=target_cols)
+                if len(X_seq) > 0:
+                    lstm_model = train_lstm_model(X_seq, y_seq, is_batting=True, epochs=50)
+                    
+                    latest_seq = df_encoded[feature_cols].tail(seq_length).values
+                    latest_seq = np.expand_dims(latest_seq, axis=0)
+                    
+                    lstm_preds = predict_next_sequence(lstm_model, latest_seq)
+                    if lstm_preds is not None:
+                        lstm_expected_runs = max(0, float(lstm_preds[0]))
+                        
+                        def sigmoid(x):
+                            x = np.clip(x, -500, 500)
+                            return 1 / (1 + np.exp(-x))
+                        
+                        lstm_prob_50 = round(float(sigmoid(lstm_preds[1])) * 100)
+                        lstm_prob_100 = round(float(sigmoid(lstm_preds[2])) * 100)
+                        
+                        # Ensemble: average LSTM + sklearn
+                        preds["expected_runs"] = round((preds.get("expected_runs", 0) + lstm_expected_runs) / 2)
+                        preds["prob_50"] = round((preds.get("prob_50", 0) + lstm_prob_50) / 2)
+                        preds["prob_100"] = round((preds.get("prob_100", 0) + lstm_prob_100) / 2)
+                        preds["model"] = "Time-Series + GBM Ensemble"
+        except Exception as lstm_err:
+            print(f"[LSTM] Batting inference failed: {lstm_err}. Using sklearn predictions.")
+        # --------------------------
+
         # Determine confidence based on MAE
         mae = metrics.get('runs_mae_gb', 20)
         confidence = max(0, min(100, 100 - mae * 1.5))
@@ -55,7 +98,7 @@ def run_prediction_pipeline(df_subject_full: pd.DataFrame, subject: str, is_batt
         expected_runs = preds.get('expected_runs', 0)
         margin = max(3, expected_runs * 0.1) # 10% margin
         preds["expected_average_range"] = f"{round(expected_runs - margin)}–{round(expected_runs + margin)}"
-        preds["expected_runs"] = expected_runs
+        preds["expected_runs"] = round(expected_runs)
         
     else:
         models, metrics = train_bowling_models(df_encoded)
@@ -63,6 +106,34 @@ def run_prediction_pipeline(df_subject_full: pd.DataFrame, subject: str, is_batt
             return {"error": "Training failed."}
         preds = predict_next_bowling(models, df_encoded, target_context)
         
+        # ---- LSTM Integration ----
+        try:
+            if LSTM_AVAILABLE:
+                seq_length = 5
+                available_cols = df_encoded.columns.tolist()
+                feature_cols = [c for c in ["runs_conceded", "economy", "balls_bowled", "wickets", "neutral_venue", "is_chasing", "opp_freq"] if c in available_cols]
+                target_cols = ["wickets", "economy"]
+                
+                X_seq, y_seq = build_sequence_dataset(df_encoded, seq_length=seq_length, feature_cols=feature_cols, target_cols=target_cols)
+                if len(X_seq) > 0:
+                    lstm_model = train_lstm_model(X_seq, y_seq, is_batting=False, epochs=50)
+                    
+                    latest_seq = df_encoded[feature_cols].tail(seq_length).values
+                    latest_seq = np.expand_dims(latest_seq, axis=0)
+                    
+                    lstm_preds = predict_next_sequence(lstm_model, latest_seq)
+                    if lstm_preds is not None:
+                        lstm_expected_wickets = max(0, float(lstm_preds[0]))
+                        lstm_expected_econ = max(0, float(lstm_preds[1]))
+                        
+                        # Ensemble
+                        preds["expected_wickets"] = round((preds.get("expected_wickets", 0) + lstm_expected_wickets) / 2, 1)
+                        preds["expected_economy"] = round((preds.get("expected_economy", 0) + lstm_expected_econ) / 2, 2)
+                        preds["model"] = "Time-Series + GBM Ensemble"
+        except Exception as lstm_err:
+            print(f"[LSTM] Bowling inference failed: {lstm_err}. Using sklearn predictions.")
+        # --------------------------
+
         mae = metrics.get('wickets_mae', 1.0)
         confidence = max(0, min(100, 100 - mae * 20))
         preds["confidence"] = round(confidence)

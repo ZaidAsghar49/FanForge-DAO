@@ -42,6 +42,9 @@ class FilterSet:
     season_gte: int | None = None    # year >= N
     season_lte: int | None = None    # year <= N
     season_eq: int | None = None     # exact year
+    start_date: str | None = None    # ISO date string (YYYY-MM-DD)
+    end_date: str | None = None      # ISO date string
+    as_of_date: str | None = None    # ISO date string
     day_night: str | None = None
     innings: int | None = None
     toss_decision: str | None = None
@@ -237,6 +240,10 @@ def _build_filter_set(
     season_raw = raw_filters.get("season")
     if season_raw:
         fs.season_gte, fs.season_lte, fs.season_eq = _parse_season(season_raw)
+
+    fs.start_date = raw_filters.get("start_date")
+    fs.end_date   = raw_filters.get("end_date")
+    fs.as_of_date = raw_filters.get("as_of_date")
 
     # Match context
     fs.day_night     = raw_filters.get("day_night")

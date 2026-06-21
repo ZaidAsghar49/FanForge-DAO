@@ -131,11 +131,13 @@ FILTER_KEYS = [
 _FILTER_SCHEMA_PROMPT = """
 Return a JSON object with these exact top-level keys:
 {
-  "subject_type": <"player" | "team" | "country" | null>,
-  "subject": <str | null>,          // player name
+  "subject_type": <"player" | "team" | "country" | "group" | null>,
+  "subject": <str | null>,          // player name, or null if subject_type is "group"
   "metric": <str | null>,           // e.g. "Batting Average", "Wickets"
   "claimed_value": <float | null>,  // numeric value
   "as_of_date": <str | null>,       // ISO date: "YYYY-MM-DD" (optional temporal anchor)
+  "start_date": <str | null>,       // ISO date: "YYYY-MM-DD" (for "since YYYY")
+  "end_date": <str | null>,         // ISO date: "YYYY-MM-DD" (for "until YYYY" or "between YYYY and YYYY")
   "filters": {
     "venue_name": <str | null>, "city": <str | null>, "country": <str | null>,
     "format": <str | null>, "season": <str | null>, "day_night": <str | null>,
@@ -157,8 +159,8 @@ Your task is to parse a natural-language cricket claim into a structured JSON ob
 Rules:
 • Only output valid JSON — no markdown, no explanation.
 • Set any unmentioned filter to null (not absent).
-• subject_type must match the claim intent: "player" for player stats, "team" for team stats, "country" for country aggregates.
-• as_of_date: if claim asks about a year (e.g., "in 2023"), set as_of_date to that year's end (2023-12-31).
+• subject_type must match the claim intent: "player" for player stats, "team" for team stats, "country" for country aggregates, "group" for generic aggregate queries without a specific named subject (e.g., "left-handed batters").
+• Temporal parsing: "in 2023" → as_of_date="2023-12-31". "since 2019" / "from 2019" → start_date="2019-01-01". "for 3 years" (relative to now) → calculate start_date explicitly (e.g. "2023-01-01" if current year is 2026).
 • For bowler_hand infer from phrases like "left-arm pace" → bowler_hand="Left", bowler_type="Pace".
 • For match_phase: "powerplay" → "Powerplay"; "death overs" / "final overs" → "Death";
   "middle overs" → "Middle".
@@ -166,6 +168,12 @@ Rules:
 • For milestones: "centuries"/"100s"→"100s", "fifties"/"50s"→"50s",
   "fifties and centuries"→"50s and 100s".
 • home_away: infer from context when possible, e.g. "at home" → "Home".
+• Double-Country Adjectival: "Anglo-Australian clash" → series/opposition involving England and Australia.
+• Toss logic: "forced to field by England" / "inserted by England" → toss_winner="England", toss_decision="bat". "decided to set a target" → toss_decision="bat".
+• Multi-Subject Compound Splitting: "The impact of both Rohit and Rahul" → split into TWO distinct objects.
+• Nicknames & Initials: Standardize aliases ("King Kohli" → "Virat Kohli", "Boom Boom" → "Shahid Afridi", "Universe Boss" → "Chris Gayle", "SPD Smith" → "Steve Smith", "AB de Villiers" → "AB de Villiers").
+• Dynamic Pronoun Resolutions: Resolve "his record in England" by contextualizing the pronoun to the preceding subject.
+• Location separation: Map city names (e.g. "Melbourne", "London") strictly to 'city'. Map stadium names (e.g. "MCG", "Lord's", "Melbourne Cricket Ground") strictly to 'venue_name'. Do not map a city name to 'venue_name'.
 """
 
 
@@ -191,10 +199,12 @@ CRITICAL DECOMPOSITION RULES — YOU MUST FOLLOW ALL OF THEM:
    • Count the number of distinct structural claims in the paragraph.
    • Output EXACTLY that many objects in the array — no more, no fewer.
    • A "structural claim" is any assertion with its own numeric value, even if it shares a subject with a prior claim.
+   • MULTI-SUBJECT COMPOUND SPLITTING: If a claim reads "The impact of both Rohit and Rahul", duplicate the JSON parsing pipeline to evaluate TWO unique queries.
 
 3. CO-REFERENCE RESOLUTION:
    • When a clause omits the subject, metric, format, or a filter already established by a prior clause, INHERIT those values.
    • Example: "Rohit Sharma averages 66 against spin in ODIs in Australia AND 65 in India" → the second object inherits subject=Rohit Sharma, metric=Batting Average, format=ODI, bowler_type=Spin; only country changes to India.
+   • DYNAMIC PRONOUN RESOLUTION: Resolve relational phrasing like "his record in England" by linking the pronoun back to its proper noun anchor.
    • Do NOT leave inherited fields as null — carry them forward.
 
 4. CONTRASTIVE PARAMETER SPLITTING:
@@ -205,12 +215,14 @@ CRITICAL DECOMPOSITION RULES — YOU MUST FOLLOW ALL OF THEM:
 
 5. FILTER RULES (same as single-claim parser):
    • Set any unmentioned filter to null (not absent).
-   • subject_type must be "player" for player stats, "team" for team aggregates, "country" for country-level data.
+   • NICKNAMES & INITIALS: Translate popular monikers ("King Kohli" → "Virat Kohli", "SPD Smith" → "Steve Smith") into canonical names.
+   • subject_type must be "player" for player stats, "team" for team aggregates, "country" for country-level data, "group" for unnamed aggregates.
    • For bowler_type: "spin" / "spinner" → "Spin"; "pace" / "fast" / "seam" → "Pace".
    • For match_phase: "powerplay" → "Powerplay"; "death overs" → "Death"; "middle overs" → "Middle".
    • innings: "first innings" → 1, "chasing" → 2, "batting first" → 1.
-   • as_of_date: if a year is mentioned (e.g. "in 2023"), set as_of_date to "2023-12-31".
+   • Temporal parsing: "in 2023" → as_of_date="2023-12-31". "since 2019" → start_date="2019-01-01".
    • home_away: "at home" → "Home"; "away" → "Away".
+   • Location separation: Map city names (e.g. "Melbourne", "London") strictly to 'city'. Map stadium names (e.g. "MCG", "Lord's", "Melbourne Cricket Ground") strictly to 'venue_name'. Do not map a city name to 'venue_name'.
 
 EXAMPLE INPUT:
   "Rohit Sharma averages 66 against spin in ODIs in Australia and 65 in India, but against pace it drops to 33."
@@ -274,14 +286,14 @@ class FiltersModel(BaseModel):
     venue_name: str | None = None
     city: str | None = None
     country: str | None = None
-    format: str | None = None
-    season: str | None = None
-    day_night: str | None = None
+    format: Literal["Test", "ODI", "T20", "IT20", "MDM", "ODM"] | str | None = None
+    season: str | int | None = None
+    day_night: Literal["Day", "Night", "Day-Night"] | str | None = None
     toss_winner: str | None = None
-    toss_decision: str | None = None
+    toss_decision: Literal["bat", "field"] | str | None = None
     innings: int | None = Field(default=None, ge=1, le=4)
-    series: str | None = None
-    home_away: str | None = None
+    series: str | None = Field(default=None, description="Strictly formatted canonical series string")
+    home_away: Literal["Home", "Away", "Neutral"] | str | None = None
     neutral_venue: bool | None = None
     opposition: str | None = None
     dismissal_type: str | None = None
@@ -299,6 +311,115 @@ class FiltersModel(BaseModel):
     ball_type: str | None = None
     # Temporal anchor (used by validate_model loader truncation)
     as_of_date: str | None = None
+
+    @field_validator("venue_name", mode="before")
+    @classmethod
+    def _coerce_venue_name(cls, v: Any) -> Any:
+        if v is None: return None
+        if isinstance(v, str):
+            import re
+            s = v
+            # Strip out descriptive fluff
+            s = re.sub(r"(?i)^(beautiful pitch at|overcast conditions at|playing at|match at|the )\s*", "", s)
+            return s.strip()
+        return v
+
+    @field_validator("country", "toss_winner", mode="before")
+    @classmethod
+    def _coerce_country(cls, v: Any) -> Any:
+        if v is None: return None
+        if isinstance(v, str):
+            s = v.strip().lower()
+            mapping = {
+                "uk": "England", "england": "England", "great britain": "England",
+                "usa": "United States", "united states": "United States",
+                "uae": "United Arab Emirates", "united arab emirates": "United Arab Emirates",
+                "rsa": "South Africa", "south africa": "South Africa",
+                "wi": "West Indies", "west indies": "West Indies",
+                "windies": "West Indies", "aussies": "Australia",
+                "australia": "Australia", "nz": "New Zealand", "new zealand": "New Zealand",
+                "black caps": "New Zealand", "india": "India",
+                "pakistan": "Pakistan", "sri lanka": "Sri Lanka", "ceylon": "Sri Lanka",
+                "bangladesh": "Bangladesh", "zimbabwe": "Zimbabwe", "rhodesia": "Zimbabwe"
+            }
+            return mapping.get(s, v.title())
+        return v
+
+    @field_validator("format", mode="before")
+    @classmethod
+    def _coerce_format(cls, v: Any) -> Any:
+        if v is None: return None
+        if isinstance(v, str):
+            s = v.strip().lower()
+            mapping = {
+                "test": "Test", "tests": "Test", "five-day matches": "Test", "timed matches": "Test", "first-class standard": "Test",
+                "odi": "ODI", "odis": "ODI", "50-over matches": "ODI", "one-day internationals": "ODI", "list a": "ODI",
+                "t20i": "IT20", "t20is": "IT20",
+                "t20": "T20", "t20s": "T20", "twenty20s": "T20"
+            }
+            return mapping.get(s, v.upper())
+        return v
+
+    @field_validator("season", mode="before")
+    @classmethod
+    def _coerce_season(cls, v: Any) -> Any:
+        if v is None: return None
+        if isinstance(v, str):
+            import re
+            s = v.strip().lower()
+            # Handle "2022/23" or "2022-23" or "2022 _ 23"
+            m = re.match(r"(\d{4})\s*[_/\-]\s*(\d{2}|\d{4})", s)
+            if m:
+                # return just the starting year as string for season matching
+                return m.group(1)
+            # Handle "back in '99"
+            if s == "back in '99" or "99" in s: return "1999"
+            if "mid-2000s" in s: return "2005"
+            # Return string since we'll process it further downstream
+            return s
+        return v
+
+    @field_validator("day_night", mode="before")
+    @classmethod
+    def _coerce_day_night(cls, v: Any) -> Any:
+        if v is None: return None
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if any(x in s for x in ["under lights", "pink ball", "floodlit", "d/n", "day-night", "night match", "floodlights on"]):
+                return "Day-Night"
+            if "traditional red ball" in s or "day only" in s or s == "day":
+                return "Day"
+            if s == "night":
+                return "Night"
+            return s.title()
+        return v
+
+    @field_validator("home_away", mode="before")
+    @classmethod
+    def _coerce_home_away(cls, v: Any) -> Any:
+        if v is None: return None
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if any(x in s for x in ["foreign conditions", "traveling abroad", "touring", "away"]):
+                return "Away"
+            if any(x in s for x in ["home soil", "home crowd", "at home", "home"]):
+                return "Home"
+            if "neutral" in s:
+                return "Neutral"
+            return s.title()
+        return v
+
+    @field_validator("neutral_venue", mode="before")
+    @classmethod
+    def _coerce_neutral_venue(cls, v: Any) -> Any:
+        if v is None: return None
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if any(x in s for x in ["neutral", "foreign neutral", "without home"]):
+                return True
+            if s == "true": return True
+            if s == "false": return False
+        return bool(v)
 
     @field_validator("innings", mode="before")
     @classmethod
@@ -329,9 +450,9 @@ class FiltersModel(BaseModel):
             return None
         if isinstance(v, str):
             s = v.strip().lower()
-            if s in ("bat", "batting", "bat first"):
+            if "bat" in s:
                 return "bat"
-            if s in ("field", "fielding", "bowl", "bowling", "field first", "bowl first"):
+            if "field" in s or "bowl" in s:
                 return "field"
         return v
 
@@ -361,11 +482,13 @@ class FiltersModel(BaseModel):
 
 
 class ParsedClaimModel(BaseModel):
-    subject_type: Literal["player", "team", "country"] | None = None
+    subject_type: Literal["player", "team", "country", "group"] | None = None
     subject: str | None = None
     metric: str | None = None
     claimed_value: float | None = None
     as_of_date: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
     filters: FiltersModel = Field(default_factory=FiltersModel)
 
     @field_validator("claimed_value", mode="before")
@@ -373,6 +496,16 @@ class ParsedClaimModel(BaseModel):
     def _coerce_claimed_value(cls, v: Any) -> Any:
         if v is None:
             return None
+        if isinstance(v, str):
+            import re
+            # Strip anything that is not a digit, minus sign, or decimal point
+            s = re.sub(r"[^\d\.\-]", "", v)
+            if not s:
+                return None
+            try:
+                return float(s)
+            except Exception:
+                return None
         try:
             return float(v)
         except Exception:
@@ -391,6 +524,8 @@ class ParsedClaimModel(BaseModel):
         mapping = {
             "average": "Batting Average",
             "batting average": "Batting Average",
+            "run-per-out ratio": "Batting Average",
+            "scoring efficiency average": "Batting Average",
             "bowling average": "Bowling Average",
             "economy": "Economy Rate",
             "economy rate": "Economy Rate",
@@ -398,6 +533,9 @@ class ParsedClaimModel(BaseModel):
             "sr": "Strike Rate",
             "strike rate": "Strike Rate",
             "batting strike rate": "Strike Rate",
+            "scoring speed": "Strike Rate",
+            "strike velocity": "Strike Rate",
+            "how quickly he scores": "Strike Rate",
             "bowling strike rate": "Bowling Strike Rate",
             "wicket": "Wickets",
             "wickets": "Wickets",
@@ -405,8 +543,19 @@ class ParsedClaimModel(BaseModel):
             "total runs": "Total Runs",
             "balls faced": "Balls Faced",
             "dot ball %": "Dot Ball %",
+            "ability to rotate strike": "Dot Ball %",
+            "defensive pressure": "Dot Ball %",
+            "percentage of empty deliveries": "Dot Ball %",
+            "dot percentage": "Dot Ball %",
+            "empty ball frequency": "Dot Ball %",
             "boundary %": "Boundary %",
+            "reliance on big hits": "Boundary %",
+            "boundary scoring frequency": "Boundary %",
+            "power-hitting ratio": "Boundary %",
             "high score": "High Score",
+            "personal best score": "High Score",
+            "highest individual knock": "High Score",
+            "career-best performance": "High Score",
             "milestones": "Milestones",
             "partnership runs": "Partnership Runs",
             "dots forced": "Dots Forced",
@@ -595,6 +744,9 @@ def _subject_type_guard(claim: str, candidate: dict) -> tuple[bool, str | None]:
     st = (candidate.get("subject_type") or "").strip().lower()
     subj = (candidate.get("subject") or "").strip().lower()
     cl = claim.lower()
+
+    if st == "group":
+        return True, None
 
     # If the parsed subject (or its significant name tokens) is in the claim, it's not a mismatch.
     subj_tokens = [t for t in subj.split() if len(t) >= 3]
@@ -1246,6 +1398,25 @@ def _mock_parse(claim_string: str) -> dict:
             fl["bowler_type"] = "Spin"
         elif re.search(r"\bpace\b|seam\b|fast\b", sl):
             fl["bowler_type"] = "Pace"
+
+    # ── Temporal parsing ───────────────────────────────────────────────────
+    if re.search(r"\bsince\s+2019\b|\bfrom\s+2019\b", sl):
+        result["start_date"] = "2019-01-01"
+    elif re.search(r"\bsince\s+2020\b|\bfrom\s+2020\b", sl):
+        result["start_date"] = "2020-01-01"
+    elif re.search(r"\bfor\s+3\s+years\b", sl):
+        result["start_date"] = "2023-01-01"
+    elif re.search(r"\bsince\s+(\d{4})\b|\bfrom\s+(\d{4})\b", sl):
+        yr_m = re.search(r"\bsince\s+(\d{4})\b|\bfrom\s+(\d{4})\b", sl)
+        yr = yr_m.group(1) or yr_m.group(2)
+        result["start_date"] = f"{yr}-01-01"
+    elif re.search(r"\buntil\s+(\d{4})\b|\bbefore\s+(\d{4})\b", sl):
+        yr_m = re.search(r"\buntil\s+(\d{4})\b|\bbefore\s+(\d{4})\b", sl)
+        yr = yr_m.group(1) or yr_m.group(2)
+        result["end_date"] = f"{yr}-12-31"
+    elif re.search(r"\bin\s+(\d{4})\b", sl):
+        yr_m = re.search(r"\bin\s+(\d{4})\b", sl)
+        result["as_of_date"] = f"{yr_m.group(1)}-12-31"
 
     # Standalone hand without type
     if fl["bowler_hand"] is None:

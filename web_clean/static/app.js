@@ -795,7 +795,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 const res = await fetch("/api/v1/verify/claim", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ claim, skip_predictions: true })
+                    body: JSON.stringify({ claim, skip_predictions: false })
                 });
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.detail || "Verification failed");
@@ -962,44 +962,60 @@ document.addEventListener("DOMContentLoaded", () => {
         const card = document.createElement("div");
         card.className = "verdict-card";
 
-        // Header
-        const headerDiv = document.createElement("div");
-        headerDiv.className = `verdict-header ${cls}`;
-        headerDiv.innerHTML = `
-            <span class="verdict-pill ${cls}">
-                <i class="fa-solid ${icon}"></i> ${label}
-            </span>
-            ${accuracy !== null ? `
-            <div class="accuracy-bar-wrap">
-                <span class="accuracy-label">${accuracy}% accurate</span>
-                <div class="accuracy-bar">
-                    <div class="accuracy-bar-fill ${cls}" style="width:${Math.min(100, parseFloat(accuracy))}%"></div>
-                </div>
-            </div>` : ""}
+        // 1. Split Layout (Left: Circular Gauge, Right: Stats Grid)
+        const splitLayout = document.createElement("div");
+        splitLayout.className = "verdict-split-layout";
+
+        // Left Side: Circular SVG Gauge
+        const gaugeWrapper = document.createElement("div");
+        gaugeWrapper.className = "verdict-gauge-wrapper";
+        
+        let color = "#6b7280"; // Default grey
+        if (cls === "true") color = "#10b981";
+        else if (cls === "false") color = "#ef4444";
+        else if (cls === "approx") color = "#f59e0b";
+        else if (cls === "info") color = "#3b82f6";
+
+        const percentVal = accuracy !== null ? parseFloat(accuracy) : 0;
+        // Stroke dasharray circumference is 2 * PI * r = 2 * 3.14159 * 40 = 251.3
+        const circ = 251.3;
+        const offset = circ - (percentVal / 100) * circ;
+
+        gaugeWrapper.innerHTML = `
+            <svg class="gauge-svg" viewBox="0 0 100 100">
+                <circle class="gauge-bg" cx="50" cy="50" r="40" stroke="rgba(255,255,255,0.03)" stroke-width="8" fill="none" />
+                <circle class="gauge-fill ${cls}" cx="50" cy="50" r="40" stroke="${color}" stroke-dasharray="${circ}" stroke-dashoffset="${offset}" stroke-linecap="round" stroke-width="8" fill="none" transform="rotate(-90 50 50)" style="filter: drop-shadow(0 0 6px ${color}80)" />
+            </svg>
+            <div class="gauge-content">
+                <span class="percentage">${accuracy !== null ? Math.round(percentVal) + "%" : "N/A"}</span>
+                <span class="verdict-label ${cls}">${label}</span>
+            </div>
         `;
-        card.appendChild(headerDiv);
+        splitLayout.appendChild(gaugeWrapper);
 
-        // Stats body
+        // Right Side: Stats Grid
+        const statsGrid = document.createElement("div");
+        statsGrid.className = "verdict-stats-grid";
+
         if (status === "ok") {
-            const bodyDiv = document.createElement("div");
-            bodyDiv.className = "verdict-body";
-
             const stats = [
                 { label: "Player", value: data.subject || "—" },
                 { label: "Metric", value: data.metric || "—" },
                 { label: "Claimed", value: data.claimed_value != null ? data.claimed_value : "—" },
                 { label: "Actual", value: data.real_val != null ? parseFloat(data.real_val).toFixed(4) : "—" },
-                { label: "Sample", value: data.sample_size != null ? data.sample_size.toLocaleString() + " balls" : "—" },
+                { label: "Sample Size", value: data.sample_size != null ? data.sample_size.toLocaleString() + " balls" : "—" },
                 { label: "Confidence", value: data.confidence != null ? (parseFloat(data.confidence) * 100).toFixed(0) + "%" : "—" },
             ];
 
-            // Add active filters
             const filters = data.filters || {};
             const activeFilters = Object.entries(filters)
-                .filter(([k, v]) => v !== null && v !== undefined && !k.startsWith("_"))
-                .map(([k, v]) => `${k}: ${v}`);
+                .filter(([k, v]) => v !== null && v !== undefined && !k.startsWith("_") && k !== "location" && k !== "as_of_date")
+                .map(([k, v]) => {
+                    const cleanK = k.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+                    return `${cleanK}: ${v}`;
+                });
             if (activeFilters.length) {
-                stats.push({ label: "Filters", value: activeFilters.join(" | ") });
+                stats.push({ label: "Applied Filters", value: activeFilters.join(" | ") });
             }
 
             stats.forEach(s => {
@@ -1009,12 +1025,24 @@ document.addEventListener("DOMContentLoaded", () => {
                     <span class="verdict-stat-label">${s.label}</span>
                     <span class="verdict-stat-value">${s.value}</span>
                 `;
-                bodyDiv.appendChild(div);
+                statsGrid.appendChild(div);
             });
-            card.appendChild(bodyDiv);
+            splitLayout.appendChild(statsGrid);
+        } else {
+            // Error layout in stats grid
+            const errorDiv = document.createElement("div");
+            errorDiv.className = "verdict-stat";
+            errorDiv.innerHTML = `
+                <span class="verdict-stat-label">Calculation Status</span>
+                <span class="verdict-stat-value" style="color: #ef4444;">${escapeHtml(data.message || "Failed to process claim")}</span>
+            `;
+            statsGrid.appendChild(errorDiv);
+            splitLayout.appendChild(statsGrid);
         }
 
-        // Original claim text
+        card.appendChild(splitLayout);
+
+        // 2. Original claim text block
         if (data.claim) {
             const claimDiv = document.createElement("div");
             claimDiv.className = "verdict-claim-text";
@@ -1022,20 +1050,76 @@ document.addEventListener("DOMContentLoaded", () => {
             card.appendChild(claimDiv);
         }
 
-        // Insight
+        // 3. AI/LSTM Predictions Panel
+        const preds = data.predictions;
+        if (preds && !preds.error) {
+            const predPanel = document.createElement("div");
+            predPanel.className = "ai-forecast-panel";
+
+            // Header
+            const predHeader = document.createElement("div");
+            predHeader.className = "ai-forecast-header";
+            predHeader.innerHTML = `
+                <span class="ai-badge"><i class="fa-solid fa-brain"></i> AI Forecast</span>
+                <span class="ai-forecast-subtitle">${preds.model || 'GBM Ensemble'} · Next Match Prediction</span>
+                ${preds.confidence != null ? `<span class="ai-confidence-badge">${preds.confidence}% confidence</span>` : ""}
+            `;
+            predPanel.appendChild(predHeader);
+
+            const predGrid = document.createElement("div");
+            predGrid.className = "ai-forecast-grid";
+
+            const isBatting = preds.expected_runs != null || preds.prob_50 != null;
+            const isBowling = preds.expected_wickets != null;
+
+            if (isBatting) {
+                const forecastItems = [
+                    { icon: "fa-chart-line", label: "Expected Runs", value: preds.expected_average_range || (preds.expected_runs != null ? `~${preds.expected_runs}` : "—"), highlight: true },
+                    { icon: "fa-bolt", label: "Expected Strike Rate", value: preds.expected_sr != null ? preds.expected_sr : "—" },
+                    { icon: "fa-star-half-stroke", label: "Prob. of 50+", value: preds.prob_50 != null ? `${preds.prob_50}%` : "—" },
+                    { icon: "fa-star", label: "Prob. of 100+", value: preds.prob_100 != null ? `${preds.prob_100}%` : "—" },
+                ];
+                forecastItems.forEach(item => {
+                    const el = document.createElement("div");
+                    el.className = `ai-forecast-item${item.highlight ? " highlight" : ""}`;
+                    el.innerHTML = `
+                        <i class="fa-solid ${item.icon}"></i>
+                        <div class="ai-forecast-item-body">
+                            <span class="ai-forecast-item-label">${item.label}</span>
+                            <span class="ai-forecast-item-value">${item.value}</span>
+                        </div>
+                    `;
+                    predGrid.appendChild(el);
+                });
+            } else if (isBowling) {
+                const forecastItems = [
+                    { icon: "fa-fire", label: "Expected Wickets", value: preds.expected_wickets != null ? preds.expected_wickets : "—", highlight: true },
+                    { icon: "fa-gauge-high", label: "Expected Economy", value: preds.expected_economy != null ? preds.expected_economy : "—" },
+                ];
+                forecastItems.forEach(item => {
+                    const el = document.createElement("div");
+                    el.className = `ai-forecast-item${item.highlight ? " highlight" : ""}`;
+                    el.innerHTML = `
+                        <i class="fa-solid ${item.icon}"></i>
+                        <div class="ai-forecast-item-body">
+                            <span class="ai-forecast-item-label">${item.label}</span>
+                            <span class="ai-forecast-item-value">${item.value}</span>
+                        </div>
+                    `;
+                    predGrid.appendChild(el);
+                });
+            }
+
+            predPanel.appendChild(predGrid);
+            card.appendChild(predPanel);
+        }
+
+        // 4. AI Intelligence Insight
         if (data.insight) {
             const insightDiv = document.createElement("div");
             insightDiv.className = "verdict-insight";
-            insightDiv.innerHTML = `<i class="fa-solid fa-lightbulb"></i><span>${escapeHtml(data.insight)}</span>`;
+            insightDiv.innerHTML = `<i class="fa-solid fa-lightbulb" style="color: #f59e0b; margin-top: 3px;"></i><span>${escapeHtml(data.insight)}</span>`;
             card.appendChild(insightDiv);
-        }
-
-        // Error message
-        if (status !== "ok" && data.message) {
-            const errDiv = document.createElement("div");
-            errDiv.className = "verdict-error-msg";
-            errDiv.innerHTML = `<i class="fa-solid fa-info-circle" style="margin-right:6px;"></i>${escapeHtml(data.message)}`;
-            card.appendChild(errDiv);
         }
 
         return card;

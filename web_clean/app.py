@@ -589,7 +589,7 @@ def execute_query(query: SQLQuery):
 
 class ClaimRequest(BaseModel):
     claim: str
-    skip_predictions: Optional[bool] = True
+    skip_predictions: Optional[bool] = False
 
 
 @app.post("/api/v1/verify/claim")

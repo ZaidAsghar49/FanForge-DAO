@@ -127,3 +127,34 @@ def encode_categorical_features(df: pd.DataFrame) -> pd.DataFrame:
         
     encoded.fillna(0, inplace=True)
     return encoded
+
+def build_sequence_dataset(df: pd.DataFrame, seq_length: int = 5, feature_cols: list = None, target_cols: list = None):
+    """
+    Transforms a sequential DataFrame of innings into a 3D NumPy array for LSTM input.
+    X shape: (num_samples, seq_length, num_features)
+    y shape: (num_samples, num_targets)
+    """
+    import numpy as np
+    
+    if df is None or df.empty or len(df) <= seq_length:
+        return np.array([]), np.array([])
+        
+    if feature_cols is None:
+        feature_cols = []
+    if target_cols is None:
+        target_cols = []
+        
+    X, y = [], []
+    
+    # Ensure cols exist
+    f_cols = [c for c in feature_cols if c in df.columns]
+    t_cols = [c for c in target_cols if c in df.columns]
+    
+    data_f = df[f_cols].values
+    data_t = df[t_cols].values
+    
+    for i in range(len(df) - seq_length):
+        X.append(data_f[i : i + seq_length])
+        y.append(data_t[i + seq_length])
+        
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)

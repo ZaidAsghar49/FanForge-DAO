@@ -36,7 +36,7 @@ def predict_next_batting(models, df_recent, target_context=None):
         
     if "sr_gb" in models:
         pred_sr = models["sr_gb"].predict(X_df)[0]
-        predictions["expected_sr"] = max(0, round(pred_sr, 1))
+        predictions["expected_sr"] = float(max(0, round(pred_sr, 1)))
         
     if "prob_50" in models:
         try:
@@ -77,9 +77,9 @@ def predict_next_bowling(models, df_recent, target_context=None):
     
     predictions = {}
     if "wickets_gb" in models:
-        predictions["expected_wickets"] = round(max(0, models["wickets_gb"].predict(X_df)[0]), 1)
+        predictions["expected_wickets"] = float(round(max(0, models["wickets_gb"].predict(X_df)[0]), 1))
         
     if "econ_gb" in models:
-        predictions["expected_economy"] = round(max(0, models["econ_gb"].predict(X_df)[0]), 2)
+        predictions["expected_economy"] = float(round(max(0, models["econ_gb"].predict(X_df)[0]), 2))
         
     return predictions
