@@ -1,0 +1,21 @@
+FanForge Elite Player Dossier: Virat Kohli
+Document ID: ANL-2026-KOHLI-DEEPDIVE
+Classification: Technical Analytics
+Boilerplate notice: Confidential report compiled by FanForge-DAO sports analytics department.
+
+Executive Summary:
+Virat Kohli remains one of the most prolific batsmen in the modern era. This analysis evaluates his performance in ODI matches across different conditions, match phases, and bowling types from 2019 to 2026.
+
+Section 1: General and Situational Parameters
+Kohli's ability to anchor an innings under varying pressures is well documented.
+First, verify if Virat Kohli's batting average in ODI matches in Away conditions is 41.5.
+Additionally, check if Virat Kohli's strike rate in ODI matches in India is 98.4.
+We also need to validate if Virat Kohli's high score in the second innings of ODI matches is 122.
+
+Section 2: Match Phase and Matchup Dynamics
+Kohli's tactical approach differs depending on the match phase and the type of bowling faced.
+Verify if Kohli's strike rate against Spin bowling in ODI matches during the Middle overs is 82.5.
+Furthermore, confirm if Virat Kohli's batting average against Pace bowling in ODI matches is 48.2.
+
+Strategic Conclusion:
+Based on the data, Kohli continues to be highly effective against Pace bowling, but shows a slight drop in scoring rate against Spin during the Middle overs. His second-innings chasing ability remains world-class.

@@ -295,7 +295,7 @@ def _resolve_player(engine: IdentityEngine, name: str) -> dict | None:
 def _get_required_columns(metric: str, filters: dict) -> list[str]:
     """Determine minimum columns needed for the query to save I/O."""
     metric_l = metric.lower()
-    cols = {"match_id", "innings", "over", "ball", "batter", "bowler"} # Base
+    cols = {"match_id", "innings", "over", "ball", "batter", "bowler", "runs_batter", "is_wicket", "runs_total"} # Base
     
     # Add columns based on filters
     for key, val in filters.items():
