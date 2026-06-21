@@ -965,13 +965,10 @@ def apply_filters(df: pd.DataFrame, filters: dict | None = None, engine: Identit
     # ── 35. Match Phase ────────────────────────────────────────────────────
     match_phase = filters.get("match_phase")
     if match_phase:
-        if "match_phase" in df.columns:
-            # Fast: use pre-computed column
-            df_before = df
-            df = df[df["match_phase"].str.lower() == match_phase.lower()]
-            _assert_filter_effective(df_before, df, "match_phase")
-        elif "over" in df.columns:
-            # Vectorized rule-based match phase classification
+        # CRITICAL: Always use rule-based dynamic match phase classification 
+        # (calculated from the 'over' column) because the pre-computed match_phase 
+        # column in the SQLite DB has format-agnostic bugs (e.g. using T20 definitions for ODI).
+        if "over" in df.columns:
             df_before = df
             overs = df["over"].astype(int)
             
@@ -992,6 +989,11 @@ def apply_filters(df: pd.DataFrame, filters: dict | None = None, engine: Identit
                     phase_series = phase_series.mask(odi_mask, pd.cut(overs, bins=[-1, 9, 39, 50], labels=["Powerplay", "Middle", "Death"]))
 
             df = df[phase_series.astype(str).str.lower() == match_phase.lower()]
+            _assert_filter_effective(df_before, df, "match_phase")
+        elif "match_phase" in df.columns:
+            # Fallback to pre-computed column only if 'over' is missing
+            df_before = df
+            df = df[df["match_phase"].str.lower() == match_phase.lower()]
             _assert_filter_effective(df_before, df, "match_phase")
 
     return df
@@ -1176,9 +1178,8 @@ def _load_subject_dataframe(subject_col: str, canonical_subject: str, engine: Id
         where_clauses.append("innings = ?")
         params.append(int(filters["innings"]))
         
-    if filters.get("match_phase"):
-        where_clauses.append("LOWER(match_phase) = ?")
-        params.append(filters["match_phase"].lower())
+    # Note: match_phase SQL pushdown is bypassed because it has format-agnostic bugs in the SQLite DB.
+    # It is evaluated dynamically in Python using the 'over' and 'match_type' columns.
         
     if filters.get("batting_position") is not None:
         where_clauses.append("batting_position = ?")
@@ -1411,6 +1412,16 @@ def _execute_single_plan(
     skip_predictions: bool = False
 ) -> dict:
     """Execute a single (non-comparative) plan."""
+    if df_full.empty:
+        msg = f"No delivery data found for '{canonical}'."
+        print(f"    [X] {msg}")
+        return {
+            "status": "no_matching_data", "message": msg,
+            "subject": canonical, "metric": metric, "filters": [],
+            "sample_size": 0, "confidence": 0.0,
+            "hint": "Check if player exists in the database.",
+            "execution_mode": EXECUTION_MODE,
+        }
     fs = plan.primary
     print(f"\n[Phase 4a] Applying FilterSet ({len([v for v in vars(fs).values() if v])} active fields)...")
     df = apply_filters_from_plan(df_full, fs, engine)
@@ -1496,6 +1507,16 @@ def _execute_comparison_plan(
     df_full: pd.DataFrame, metric: str, canonical: str
 ) -> dict:
     """Execute a comparison plan — runs metric twice and returns delta."""
+    if df_full.empty:
+        msg = f"No delivery data found for '{canonical}'."
+        print(f"    [X] {msg}")
+        return {
+            "status": "no_matching_data", "message": msg,
+            "subject": canonical, "metric": metric, "filters": [],
+            "sample_size": 0, "confidence": 0.0,
+            "hint": "Check if player exists in the database.",
+            "execution_mode": EXECUTION_MODE,
+        }
     print(f"\n[Phase 4a] COMPARISON: {plan.split_label_a} vs {plan.split_label_b}")
 
     results = {}
