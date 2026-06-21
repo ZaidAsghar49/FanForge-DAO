@@ -3,6 +3,20 @@ ai_parser.py — Extended NLP Parser (38-Parameter Engine)
 =========================================================
 Extracts structured filter & metric JSON from natural-language cricket claims.
 
+Parsing Pipeline (4 layers, in priority order)
+----------------------------------------------
+  Layer 0 : SemanticCache     — exact-hash (+ optional embedding) lookup.
+            Avoids any compute for repeat/near-duplicate claims.
+  Layer 1 : GrammarParser     — deterministic slot-filling over all 38 params.
+            Handles the common templated shapes with ZERO model calls.
+            TemporalExtractor (dateparser) resolves all temporal phrases.
+  Layer 2 : ModelFallbackLayer — pluggable strategy:
+            • LocalVLLMStrategy  : local vLLM with guided JSON decoding.
+            • GroqCloudStrategy  : Groq cloud via function/tool calling
+              (schema-constrained, not free-form JSON) + validate-and-retry.
+  Layer 3 : Emergency regex   — _mock_parse() last-resort fallback.
+            Tagged _parse_degraded=True when used.
+
 Supported filter keys (38 total):
   Match Context    : venue_name, city, country, format, season, day_night,
                      toss_winner, toss_decision, innings, series, home_away,
@@ -29,6 +43,58 @@ from groq import Groq, RateLimitError, APIError
 import threading
 
 load_dotenv()
+
+# ── Layered pipeline imports (lazy to avoid circular-import at module level) ──
+# grammar_parser, parser_cache, and model_strategy are imported inside
+# _parse_claim_internal() on first call so that:
+#   1. Tests can mock them before any call is made.
+#   2. DB-backed gazetteer loading is deferred until first parse.
+
+_pipeline_lock = threading.Lock()
+_pipeline_ready = False
+_grammar_parser = None     # GrammarParser singleton
+_semantic_cache = None     # SemanticCache singleton
+_model_layer = None        # ModelFallbackLayer singleton
+
+
+def _init_pipeline() -> None:
+    """Initialise pipeline singletons (called once, thread-safe)."""
+    global _pipeline_ready, _grammar_parser, _semantic_cache, _model_layer
+    if _pipeline_ready:
+        return
+    with _pipeline_lock:
+        if _pipeline_ready:
+            return
+        import logging
+        _log = logging.getLogger("ai_parser")
+        try:
+            from scripts.analysis.parser_cache import get_default_cache
+            _semantic_cache = get_default_cache()
+        except Exception as exc:
+            _log.warning(f"SemanticCache init failed (non-fatal): {exc}")
+            _semantic_cache = None
+        try:
+            from scripts.analysis.grammar_parser import get_default_grammar_parser
+            import os
+            db_candidates = [
+                os.path.join(os.path.dirname(__file__), "..", "..", "cricket.db"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "Cricsheet.db"),
+            ]
+            db_path = next(
+                (p for p in db_candidates if os.path.exists(p)), None
+            )
+            _grammar_parser = get_default_grammar_parser(db_path=db_path)
+        except Exception as exc:
+            _log.warning(f"GrammarParser init failed (non-fatal): {exc}")
+            _grammar_parser = None
+        try:
+            from scripts.analysis.model_strategy import get_default_model_layer
+            _model_layer = get_default_model_layer()
+        except Exception as exc:
+            _log.warning(f"ModelFallbackLayer init failed (non-fatal): {exc}")
+            _model_layer = None
+        _pipeline_ready = True
+        _log.info("Layered parser pipeline initialised.")
 
 # Circuit breaker and rotation for Groq API rate limits
 _key_rate_limited_until = {}
@@ -1135,141 +1201,76 @@ def parse_paragraph(paragraph: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Internal single-claim implementation  (unchanged)
+# Internal single-claim implementation  — 4-layer pipeline
 # ---------------------------------------------------------------------------
 
 def _parse_claim_internal(claim_string: str) -> dict:
     """
     Parse a NL cricket claim into a structured filter dict.
-    Falls back to rule-based _mock_parse if LLM fails or is invalid.
+
+    Execution order (first success wins):
+      Layer 0 : SemanticCache    — zero-cost exact / near-duplicate reuse
+      Layer 1 : GrammarParser    — deterministic slot-fill, no model call
+      Layer 2 : ModelFallbackLayer — pluggable: local vLLM → Groq cloud
+      Emergency: _mock_parse()   — regex last-resort, tagged _parse_degraded
     """
     import logging
     _log = logging.getLogger("ai_parser")
 
-    if is_circuit_breaker_active():
-        result = _mock_parse(claim_string)
-        result["_parse_degraded"] = True
-        result["_parse_error"] = "Groq API rate limit circuit breaker active"
-        return result
+    # Ensure singletons are initialised
+    _init_pipeline()
 
-    keys = get_groq_api_keys()
-    if not keys:
-        result = _mock_parse(claim_string)
-        result["_parse_degraded"] = True
-        result["_parse_error"] = "No Groq API keys configured"
-        return result
+    # ── Layer 0: Semantic cache ──────────────────────────────────────────────
+    if _semantic_cache is not None:
+        try:
+            cached = _semantic_cache.get(claim_string)
+            if cached is not None:
+                _log.debug(f"Cache hit for: {claim_string[:60]!r}")
+                return cached
+        except Exception as cache_exc:
+            _log.debug(f"Cache lookup error (non-fatal): {cache_exc}")
 
-    try:
-        last_error = None
-
-        # Multi-pass parse with critic verification (double-entry bookkeeping)
-        # Optimization: Use fast-path for the first attempt.
-        for attempt in range(1, 4):
-            client, active_key = get_current_client()
-            if not client:
-                raise ValueError("No GROQ API client available")
-            try:
-                text = _llm_call(client, claim_string, _SYSTEM_PROMPT)
-            except RateLimitError as rl_exc:
-                _log.error(
-                    f"Groq API key rate-limited: {active_key[:15]}... "
-                    f"Circuit breaker armed for this key."
-                )
-                rotate_api_key(active_key)
-                if is_circuit_breaker_active():
-                    _log.error("All Groq API keys are rate-limited. Falling back.")
-                    raise rl_exc
-                _log.info("Retrying with rotated Groq API key...")
-                continue
-            except APIError as api_exc:
-                last_error = api_exc
-                _log.warning(f"Groq API error on key {active_key[:15]}...: {api_exc}")
-                rotate_api_key(active_key)
-                continue
-            except Exception as call_exc:
-                last_error = call_exc
-                _log.warning(f"Groq LLM call error: {call_exc}")
-                rotate_api_key(active_key)
-                continue
-
-            try:
-                candidate = _validate_and_sanitize(text)
-            except Exception as ve:
-                last_error = ve
-                continue
-
-            # CRITICAL: Subject anchoring check (fast deterministic)
-            ok, issue = _subject_type_guard(claim_string, candidate)
-            if not ok:
-                last_error = ValueError(issue or "SubjectTypeMismatch")
-                continue
-
-            # Critic: only run on attempt 2+ or if validation is suspect
-            # Pass 1 is usually good enough for high-end models like llama-3.3-70b
-            if attempt == 1:
-                candidate["_parse_attempts"] = attempt
-                candidate["_parse_verified"] = True
-                return candidate
-
-            try:
-                critic_in = json.dumps({"claim": claim_string, "candidate": candidate}, ensure_ascii=False)
+    # ── Layer 1: Deterministic grammar parser ────────────────────────────────
+    if _grammar_parser is not None:
+        try:
+            result = _grammar_parser.parse(claim_string)
+            result["_parse_source"] = "grammar"
+            result["_parse_verified"] = True
+            if _semantic_cache is not None:
                 try:
-                    critic_response = client.chat.completions.create(
-                        messages=[
-                            {"role": "system", "content": _CRITIC_SYSTEM_PROMPT},
-                            {"role": "user", "content": critic_in},
-                        ],
-                        model="llama-3.3-70b-versatile",
-                        temperature=0,
-                    )
-                except RateLimitError as rl_exc:
-                    _log.error(
-                        f"Groq API key rate-limited: {active_key[:15]}... "
-                        f"Circuit breaker armed for this key."
-                    )
-                    rotate_api_key(active_key)
-                    if is_circuit_breaker_active():
-                        _log.error("All Groq API keys are rate-limited. Falling back.")
-                        raise rl_exc
-                    _log.info("Retrying with rotated Groq API key...")
-                    continue
-                except APIError as api_exc:
-                    _log.warning(f"Groq critic API error on key {active_key[:15]}...: {api_exc}")
-                    rotate_api_key(active_key)
-                    continue
-                except Exception as call_exc:
-                    _log.warning(f"Groq critic LLM call error: {call_exc}")
-                    rotate_api_key(active_key)
-                    continue
-                critic_text = critic_response.choices[0].message.content
-                critic = _parse_json_only(critic_text)
-                if isinstance(critic, dict) and critic.get("verdict") == "ok":
-                    ok, issue = _subject_type_guard(claim_string, candidate)
-                    if not ok:
-                        candidate["_parse_verified"] = False
-                        last_error = ValueError(issue or "SubjectTypeMismatch")
-                        continue
-                    candidate["_parse_attempts"] = attempt
-                    candidate["_parse_verified"] = True
-                    return candidate
-                # else retry with critic issues implicitly captured by next attempt
-                candidate["_parse_verified"] = False
-            except RateLimitError:
-                raise
-            except Exception:
-                # If critic fails, still return validated candidate (better than falling back)
-                candidate["_parse_attempts"] = attempt
-                candidate["_parse_verified"] = False
-                return candidate
+                    _semantic_cache.put(claim_string, result)
+                except Exception:
+                    pass
+            return result
+        except Exception as grammar_exc:
+            # GrammarParseError is expected for complex claims → fall through
+            _log.debug(f"GrammarParser could not resolve: {grammar_exc}")
 
-        raise ValueError(f"LLM parse failed after retries: {last_error}")
-    except Exception as exc:
-        # LLM is an external dependency — always fall back to rule-based parser.
-        # In STRICT mode we mark the result degraded so downstream can log it.
-        result = _mock_parse(claim_string)
-        result["_parse_degraded"] = True
-        result["_parse_error"] = str(exc)
-        return result
+    # ── Layer 2: Model fallback (local vLLM → Groq cloud) ───────────────────
+    if _model_layer is not None:
+        try:
+            model_result = _model_layer.parse(claim_string)
+            if model_result is not None:
+                model_result.setdefault("_parse_verified", True)
+                if _semantic_cache is not None:
+                    try:
+                        _semantic_cache.put(claim_string, model_result)
+                    except Exception:
+                        pass
+                return model_result
+        except Exception as model_exc:
+            _log.warning(f"ModelFallbackLayer error: {model_exc}")
+
+    # ── Emergency: legacy regex fallback ─────────────────────────────────────
+    _log.warning(
+        f"All parser layers failed for: {claim_string[:80]!r}. "
+        "Using emergency regex fallback (_mock_parse)."
+    )
+    result = _mock_parse(claim_string)
+    result["_parse_degraded"] = True
+    result["_parse_source"] = "regex_emergency"
+    result["_parse_error"] = "All parser layers failed"
+    return result
 
 
 # ---------------------------------------------------------------------------

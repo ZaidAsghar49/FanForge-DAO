@@ -11,3 +11,9 @@ scikit-learn>=1.8.0
 xgboost>=3.1.0
 pypdf>=6.8.0
 pdfplumber>=0.11.9
+# Layered parser pipeline
+lark>=1.2.0
+dateparser>=1.2.0
+# Optional: sentence-transformers enables embedding-based semantic cache
+# (comment out to disable; exact-hash cache is always available)
+sentence-transformers>=3.0.0
