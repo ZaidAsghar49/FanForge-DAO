@@ -1,0 +1,19 @@
+FanForge Temporal & Milestone Auditing
+Doc Code: TEMP-MILESTONE-04
+
+Notice:
+Boilerplate and statistical indexes are subject to daily updates. All data here reflects records from 2019 to 2026.
+
+Section 1: Modern Era Milestones (Since 2022)
+Performance after the global pandemic has shown significant variation due to changing schedules.
+Check if Virat Kohli has scored 6 centuries in ODI matches since 2022.
+Validate if Babar Azam has scored 12 fifties in ODI matches between 2020 and 2024.
+Let's also verify if Shubman Gill's boundary percentage in ODI matches in the year 2023 is above 12.5%.
+
+Section 2: Career Segments and Over Ranges
+We break down performance by career seasons and specific over ranges.
+Check if Rohit Sharma's boundary percentage in Test matches during the 2019/20 season is 8.4%.
+Verify if David Warner's strike rate in T20 matches in the first 6 overs is 142.0.
+Confirm if KL Rahul has 3 half-centuries in ODI matches in the 2023 season.
+
+Data sourced from FanForge-DAO database.

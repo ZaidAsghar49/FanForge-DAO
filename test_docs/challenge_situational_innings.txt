@@ -1,0 +1,19 @@
+FanForge Situational & Innings Analytics
+Ref: SIT-ANALYTICS-2026
+
+Introduction:
+Cricket matches are heavily influenced by the toss, home advantage, and the pressure of chasing in the fourth innings of a Test match.
+
+Section 1: The Pressure of Chasing (2nd and 4th Innings)
+Batsmen chasing a target face different pressures compared to setting one.
+Verify if Virat Kohli's batting average in the second innings of ODI matches is 65.2.
+Check if Joe Root's batting average in the fourth innings of Test matches is 38.5.
+Additionally, validate if Rohit Sharma's high score in the second innings of ODI matches is 208.
+
+Section 2: Toss Decisions and Home/Away Filters
+Captain's decisions at the toss often dictate the flow of the game.
+Determine if Kane Williamson's batting average in ODI matches when his team bats first is 48.0.
+Confirm if Steve Smith's batting average in Test matches in Away conditions is 55.4.
+Check if Babar Azam's strike rate in T20 matches at Neutral venues is 128.5.
+
+End of Situational Report.

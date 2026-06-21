@@ -1,0 +1,17 @@
+FanForge Bowling Performance Evaluation
+Document ID: AUD-2026-BOWLING-PHASES
+Boilerplate notice: This document is the property of FanForge DAO. Unauthorized reproduction is strictly prohibited.
+
+Section I: Powerplay and Death Over Specialists
+Bowling metrics must be evaluated in context. A high economy rate at the death is often acceptable if wickets are taken.
+Let's verify if Jasprit Bumrah's economy rate in the Death overs during T20 matches is below 7.80.
+We also need to check if Shaheen Afridi's bowling strike rate in the Powerplay during ODI matches is 22.5.
+Additionally, check if Mitchell Starc's wickets count in Test matches played in Australia is above 120.
+
+Section II: Middle Overs and Matchup Analytics
+During the middle overs, spinners look to restrict runs while captains use target matchups.
+Rashid Khan's bowling average in ODI matches in India during the Middle overs is 21.4.
+Furthermore, Ravichandran Ashwin's economy rate in Test matches in India is 2.35.
+Let's also validate if Pat Cummins's economy rate in overs 10 to 15 in ODI matches is less than 5.2 runs per over.
+
+Report compiled by FanForge Data Engine.

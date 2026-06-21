@@ -1,0 +1,19 @@
+FanForge Extreme Filter Challenge Suite
+Document ID: EXT-CHALLENGE-99
+
+WARNING:
+This suite contains highly nested multi-variable queries designed to push the parser's logic and the database execution planner to their absolute limits.
+
+Test Case A: Multi-Layered Matchup and Venue Filter
+We combine bowler type, format, venue, and season in a single claim.
+Validate if Steve Smith's batting average in Test matches against Pace at the Melbourne Cricket Ground is 48.5.
+Check if Babar Azam's dismissal type of caught in ODI matches against Pace is above 45.0%.
+Verify if Virat Kohli's batting average in Test matches against Spin in Away conditions is 32.8.
+
+Test Case B: Extreme Over Range and Bowling Matchups
+Bowling matchups combined with specific over sequences.
+Check if Jasprit Bumrah's economy rate in T20 matches in overs 18 to 20 is 6.50.
+Validate if Rashid Khan's bowling strike rate in T20 matches in Middle overs is 16.8.
+Verify if Ravindra Jadeja's batting strike rate against Pace in the Death overs of ODI matches is 115.0.
+
+End of Extreme Test Suite.
