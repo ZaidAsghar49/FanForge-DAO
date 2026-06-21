@@ -395,6 +395,7 @@ def isolate_claims(chunks: list[str]) -> list[str]:
     """
     candidates: list[str] = []
     seen: set[str] = set()
+    last_seen_player: str | None = None
 
     for chunk in chunks:
         sentences = _split_into_sentences(chunk)
@@ -406,6 +407,31 @@ def isolate_claims(chunks: list[str]) -> list[str]:
             sent_clean = sent.strip()
             if len(sent_clean) < 10:
                 continue
+
+            # 1. Chronological player name tracking (preflight check)
+            hint = _extract_player_hint(sent_clean)
+            if hint:
+                try:
+                    check = preflight_identity_check(sent_clean)
+                    if check.get("player_found"):
+                        last_seen_player = check.get("resolved_name")
+                except Exception:
+                    pass
+
+            # 2. Pronoun resolution
+            if last_seen_player:
+                sent_clean = re.compile(r"\bhimself\b", re.I).sub(last_seen_player, sent_clean)
+                sent_clean = re.compile(r"\bherself\b", re.I).sub(last_seen_player, sent_clean)
+                sent_clean = re.compile(r"\bthemselves\b", re.I).sub(last_seen_player, sent_clean)
+                sent_clean = re.compile(r"\btheir\b", re.I).sub(f"{last_seen_player}'s", sent_clean)
+                sent_clean = re.compile(r"\btheirs\b", re.I).sub(f"{last_seen_player}'s", sent_clean)
+                sent_clean = re.compile(r"\bthey\b", re.I).sub(last_seen_player, sent_clean)
+                sent_clean = re.compile(r"\bthem\b", re.I).sub(last_seen_player, sent_clean)
+                sent_clean = re.compile(r"\bhis\b", re.I).sub(f"{last_seen_player}'s", sent_clean)
+                sent_clean = re.compile(r"\bhe\b", re.I).sub(last_seen_player, sent_clean)
+                sent_clean = re.compile(r"\bhim\b", re.I).sub(last_seen_player, sent_clean)
+                sent_clean = re.compile(r"\bher\b", re.I).sub(f"{last_seen_player}'s", sent_clean)
+                sent_clean = re.compile(r"\bshe\b", re.I).sub(last_seen_player, sent_clean)
 
             has_number = bool(_NUMERIC_RE.search(sent_clean))
             starts_with_query_verb = bool(_QUERY_VERB_RE.match(sent_clean))
