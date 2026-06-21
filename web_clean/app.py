@@ -36,6 +36,9 @@ app.add_middleware(
 DB_PATH = Path("Dataset/Processed/cricket_clean_38.db")
 GZ_DB_PATH = DB_PATH.with_suffix(".db.gz")
 
+# Crucial: Configure the exact path for IdentityEngine before validate_model loads
+os.environ["CRICKET_DB_PATH"] = str(DB_PATH.absolute())
+
 def check_and_decompress_db():
     if not DB_PATH.exists() and GZ_DB_PATH.exists():
         import gzip
