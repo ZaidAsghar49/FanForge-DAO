@@ -76,12 +76,15 @@ def _init_pipeline() -> None:
         try:
             from scripts.analysis.grammar_parser import get_default_grammar_parser
             import os
+            _root = os.path.join(os.path.dirname(__file__), "..", "..")
             db_candidates = [
-                os.path.join(os.path.dirname(__file__), "..", "..", "cricket.db"),
-                os.path.join(os.path.dirname(__file__), "..", "..", "Cricsheet.db"),
+                os.environ.get("CRICKET_DB_PATH"),
+                os.path.join(_root, "Dataset", "Processed", "cricket_clean_38.db"),
+                os.path.join(_root, "cricket.db"),
+                os.path.join(_root, "Cricsheet.db"),
             ]
             db_path = next(
-                (p for p in db_candidates if os.path.exists(p)), None
+                (p for p in db_candidates if p and os.path.exists(p)), None
             )
             _grammar_parser = get_default_grammar_parser(db_path=db_path)
         except Exception as exc:
